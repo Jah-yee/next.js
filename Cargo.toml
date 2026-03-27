@@ -344,7 +344,7 @@ unty = "0.0.4"
 url = "2.2.2"
 urlencoding = "2.1.2"
 uuid = "1.18.1"
-vergen = { version = "9.0.6", features = ["cargo"] }
+vergen = { version = "=9.0.6", features = ["cargo"] }
 vergen-gitcl = { version = "1.0.8", features = ["cargo"] }
 webbrowser = "1.0.6"
 
