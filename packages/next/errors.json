@@ -1147,5 +1147,11 @@
   "1146": "Internal Next.js Error: Prefetch inlining is enabled but no hint tree was provided during incremental static revalidation. The prefetch-hints.json manifest should contain an entry for this route. This is a bug in Next.js.",
   "1147": "Turbopack database compaction is not supported on this platform",
   "1148": "WASM instance %s not found",
-  "1149": "WASM module %s not found"
+  "1149": "WASM module %s not found",
+  "1150": "Unexpected optype: %s",
+  "1151": "Module %s not found",
+  "1152": "No active instance for memory operation",
+  "1153": "Unknown request type: %s",
+  "1154": "Instance %s not found",
+  "1155": "wasm-worker must be run as a worker thread"
 }
