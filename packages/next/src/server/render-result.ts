@@ -292,6 +292,7 @@ export default class RenderResult<
           __non_webpack_require__('node:stream') as typeof import('node:stream')
         ).Readable
       }
+      // TODO: When using Node.js streams we should use them instead of converting to webstream here.
       return [Readable.toWeb(this.response) as ReadableStream<Uint8Array>]
     } else {
       return [this.response]
