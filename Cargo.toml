@@ -87,7 +87,7 @@ inherits = "release"
 debug = true
 
 # Size-optimized crates: determined via `cargo bloat --release --crates -p next-napi-bindings`.
-# Wasmer/cranelift crates are used by the plugin feature (wasm builds).
+# Wasmtime/cranelift crates are used by the plugin feature (wasm builds).
 [profile.release.package.browserslist-rs]
 opt-level = "s"
 
@@ -140,18 +140,6 @@ opt-level = "s"
 opt-level = "s"
 
 [profile.release.package.swc_ecma_transforms_proposal]
-opt-level = "s"
-
-[profile.release.package.swc_plugin_backend_wasmer]
-opt-level = "s"
-
-[profile.release.package.swc_plugin_runner]
-opt-level = "s"
-
-[profile.release.package.wasmer]
-opt-level = "s"
-
-[profile.release.package.wasmer-compiler]
 opt-level = "s"
 
 [workspace.dependencies]
@@ -215,7 +203,7 @@ swc_core = { version = "58.0.4", default-features = false, features = [
   "ecma_loader_parking_lot",
   "parallel_rayon",
 ] }
-swc_plugin_backend_wasmer = { version = "8.0.0" }
+swc_plugin_backend_wasmtime = "7.0.0"
 testing = "20.0.0"
 
 # Keep consistent with preset_env_base through swc_core
