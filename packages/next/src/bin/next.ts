@@ -206,6 +206,14 @@ program
     '--experimental-cpu-prof',
     'Enable CPU profiling. Profile is saved to .next-profiles/ on exit.'
   )
+  .addOption(
+    new Option(
+      '--internal-trace [level]',
+      'Enable Turbopack tracing. "all" (default) enables turbo-tasks level tracing, "overview" enables overview tracing.'
+    )
+      .choices(['all', 'overview'])
+      .preset('all')
+  )
   .action((directory: string, options: NextBuildOptions) => {
     if (options.debugPrerender) {
       // @ts-expect-error not readonly
@@ -222,6 +230,10 @@ program
       const cpuProfileDir = join(dir, '.next-profiles')
       mkdirSync(cpuProfileDir, { recursive: true })
       process.env.NEXT_CPU_PROF_DIR = cpuProfileDir
+    }
+    if (options.internalTrace) {
+      process.env.NEXT_TURBOPACK_TRACING =
+        options.internalTrace === 'overview' ? '1' : 'turbo-tasks'
     }
 
     // ensure process exits after build completes so open handles/connections
@@ -348,6 +360,14 @@ program
     '--experimental-cpu-prof',
     'Enable CPU profiling. Profiles are saved to .next-profiles/ on exit.'
   )
+  .addOption(
+    new Option(
+      '--internal-trace [level]',
+      'Enable Turbopack tracing. "all" (default) enables turbo-tasks level tracing, "overview" enables overview tracing.'
+    )
+      .choices(['all', 'overview'])
+      .preset('all')
+  )
   .action(
     (directory: string, options: NextDevOptions, { _optionValueSources }) => {
       if (options.experimentalNextConfigStripTypes) {
@@ -361,6 +381,10 @@ program
         const cpuProfileDir = join(dir, '.next-profiles')
         mkdirSync(cpuProfileDir, { recursive: true })
         process.env.NEXT_CPU_PROF_DIR = cpuProfileDir
+      }
+      if (options.internalTrace) {
+        process.env.NEXT_TURBOPACK_TRACING =
+          options.internalTrace === 'overview' ? '1' : 'turbo-tasks'
       }
       const portSource = _optionValueSources.port
       import('../cli/next-dev.js').then((mod) =>
