@@ -3025,6 +3025,7 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
         is_serializable_cell_content: bool,
         content: CellContent,
         updated_key_hashes: Option<SmallVec<[u64; 2]>>,
+        content_hash: Option<[u8; 16]>,
         verification_mode: VerificationMode,
         turbo_tasks: &dyn TurboTasksBackendApi<TurboTasksBackend<B>>,
     ) {
@@ -3034,6 +3035,7 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
             content,
             is_serializable_cell_content,
             updated_key_hashes,
+            content_hash,
             verification_mode,
             self.execute_context(turbo_tasks),
         );
@@ -3551,6 +3553,7 @@ impl<B: BackingStorage> Backend for TurboTasksBackend<B> {
         is_serializable_cell_content: bool,
         content: CellContent,
         updated_key_hashes: Option<SmallVec<[u64; 2]>>,
+        content_hash: Option<[u8; 16]>,
         verification_mode: VerificationMode,
         turbo_tasks: &dyn TurboTasksBackendApi<Self>,
     ) {
@@ -3560,6 +3563,7 @@ impl<B: BackingStorage> Backend for TurboTasksBackend<B> {
             is_serializable_cell_content,
             content,
             updated_key_hashes,
+            content_hash,
             verification_mode,
             turbo_tasks,
         );
