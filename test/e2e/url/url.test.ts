@@ -16,9 +16,7 @@ describe(`Handle new URL asset references`, () => {
     env: {
       // rely on skew protection when deployed
       NEXT_DEPLOYMENT_ID: isNextStart ? 'test-deployment-id' : undefined,
-      __NEXT_IMMUTABLE_ASSET_TOKEN: isNextStart
-        ? 'test-immutable-tkn-7890'
-        : undefined,
+      __NEXT_SUPPORTS_IMMUTABLE_ASSETS: isNextStart ? '1' : undefined,
     },
     skipDeployment: true,
   })
