@@ -42,11 +42,10 @@ describe(`Handle new URL asset references`, () => {
       expectedToken = undefined
     } else {
       expectedToken = next.assetToken
-      if (!expectedToken) {
-        throw new Error('Missing deployment id')
-      }
     }
-    clientUrl = `/_next/static/media/vercel.HASH.png${expectedToken ? `?dpl=${expectedToken}` : ''}`
+    clientUrl = isTurbopack
+      ? `/_next/immutable/media/vercel.HASH.png`
+      : `/_next/static/media/vercel.HASH.png${expectedToken ? `?dpl=${expectedToken}` : ''}`
   })
 
   it('should respond on middleware api', async () => {
