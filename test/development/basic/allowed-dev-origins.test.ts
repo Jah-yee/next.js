@@ -4,6 +4,33 @@ import webdriver from 'next-webdriver'
 import { createNext, FileRef } from 'e2e-utils'
 import { NextInstance } from 'e2e-utils'
 import { fetchViaHTTP, findPort, retry } from 'next-test-utils'
+import * as cheerio from 'cheerio'
+
+// The static chunk path varies by bundler:
+// - webpack: /_next/static/chunks/pages/_app.js (known path)
+// - turbopack: /_next/immutable/chunks/... (content-addressed, extracted from HTML)
+async function getChunkPath(
+  next: NextInstance,
+  basePath: string
+): Promise<string> {
+  if (process.env.IS_TURBOPACK_TEST) {
+    const html = await next.render(withBasePath(basePath, '/'))
+    const $ = cheerio.load(html)
+    const scripts = $('script[src]')
+      .toArray()
+      .map((el) => $(el).attr('src')!)
+      .filter(
+        (src) =>
+          src.includes('/_next/immutable/chunks/') ||
+          src.includes('/_next/static/chunks/')
+      )
+    if (scripts.length === 0) {
+      throw new Error('No chunk script found in HTML')
+    }
+    return scripts[0]
+  }
+  return withBasePath(basePath, '/_next/static/chunks/pages/_app.js')
+}
 
 async function createHostServer() {
   const server = http.createServer((req, res) => {
@@ -41,21 +68,16 @@ function getImageOptimizerPath(basePath: string) {
 
 function requestInternalDevScript(
   appPort: string | number,
-  basePath: string,
+  chunkPath: string,
   options: { referer?: string } = {}
 ) {
-  return fetchViaHTTP(
-    appPort,
-    withBasePath(basePath, '/_next/static/chunks/pages/_app.js'),
-    undefined,
-    {
-      headers: {
-        ...(options.referer ? { referer: options.referer } : {}),
-        'sec-fetch-mode': 'no-cors',
-        'sec-fetch-site': 'cross-site',
-      },
-    }
-  )
+  return fetchViaHTTP(appPort, chunkPath, undefined, {
+    headers: {
+      ...(options.referer ? { referer: options.referer } : {}),
+      'sec-fetch-mode': 'no-cors',
+      'sec-fetch-site': 'cross-site',
+    },
+  })
 }
 
 function requestInternalDevMiddleware(
@@ -122,6 +144,7 @@ describe.each(['', '/docs'])(
     let next: NextInstance
 
     describe('default blocking', () => {
+      let chunkPath: string
       beforeAll(async () => {
         next = await createNext({
           files: {
@@ -133,18 +156,10 @@ describe.each(['', '/docs'])(
           },
         })
 
-        // render 404 page to generate
-        // "/_next/static/chunks/pages/_app.js"
-        // we need this because not found static assets
-        // served as plain text 404 instead of HTML.
-        await next.render(withBasePath(basePath, '/404'))
+        chunkPath = await getChunkPath(next, basePath)
 
         await retry(async () => {
-          // make sure host server is running
-          const res = await fetchViaHTTP(
-            next.appPort,
-            withBasePath(basePath, '/_next/static/chunks/pages/_app.js')
-          )
+          const res = await fetchViaHTTP(next.appPort, chunkPath)
           expect(res.status).toBe(200)
         })
       })
@@ -196,7 +211,7 @@ describe.each(['', '/docs'])(
 
         const mismatchedPortRes = await requestInternalDevScript(
           next.appPort,
-          basePath,
+          chunkPath,
           {
             referer: `http://127.0.0.1:${port}/about`,
           }
@@ -205,7 +220,7 @@ describe.each(['', '/docs'])(
 
         const differentHostRes = await requestInternalDevScript(
           next.appPort,
-          basePath,
+          chunkPath,
           {
             referer: 'https://example.vercel.sh/about',
           }
@@ -213,10 +228,7 @@ describe.each(['', '/docs'])(
         expect(differentHostRes.status).toBe(403)
 
         expectBlockedDevResourceMessage(next.cliOutput, {
-          resourcePath: withBasePath(
-            basePath,
-            '/_next/static/chunks/pages/_app.js'
-          ),
+          resourcePath: chunkPath,
           source: 'example.vercel.sh',
         })
       })
@@ -245,15 +257,13 @@ describe.each(['', '/docs'])(
       })
 
       it('should allow same-site requests without an origin header', async () => {
-        const res = await fetchViaHTTP(
-          next.appPort,
-          withBasePath(basePath, '/_next/static/chunks/pages/_app.js')
-        )
+        const res = await fetchViaHTTP(next.appPort, chunkPath)
         expect(res.status).toBe(200)
       })
     })
 
     describe('configured but not allowlisted origins', () => {
+      let chunkPath: string
       beforeAll(async () => {
         next = await createNext({
           files: {
@@ -266,13 +276,10 @@ describe.each(['', '/docs'])(
           },
         })
 
-        await next.render(withBasePath(basePath, '/404'))
+        chunkPath = await getChunkPath(next, basePath)
 
         await retry(async () => {
-          const res = await fetchViaHTTP(
-            next.appPort,
-            withBasePath(basePath, '/_next/static/chunks/pages/_app.js')
-          )
+          const res = await fetchViaHTTP(next.appPort, chunkPath)
           expect(res.status).toBe(200)
         })
       })
@@ -308,7 +315,7 @@ describe.each(['', '/docs'])(
       })
 
       it('should block no-cors requests from configured but non-allowlisted hosts', async () => {
-        const res = await requestInternalDevScript(next.appPort, basePath, {
+        const res = await requestInternalDevScript(next.appPort, chunkPath, {
           referer: 'https://example.vercel.sh/about',
         })
         expect(res.status).toBe(403)
@@ -316,6 +323,7 @@ describe.each(['', '/docs'])(
     })
 
     describe('configured allowed origins', () => {
+      let chunkPath: string
       beforeAll(async () => {
         next = await createNext({
           files: {
@@ -328,18 +336,10 @@ describe.each(['', '/docs'])(
           },
         })
 
-        // render 404 page to generate
-        // "/_next/static/chunks/pages/_app.js"
-        // since we haven't built any paths by this point
-        // causing this chunk to not be written to disk yet
-        await next.render(withBasePath(basePath, '/404'))
+        chunkPath = await getChunkPath(next, basePath)
 
         await retry(async () => {
-          // make sure host server is running
-          const res = await fetchViaHTTP(
-            next.appPort,
-            withBasePath(basePath, '/_next/static/chunks/pages/_app.js')
-          )
+          const res = await fetchViaHTTP(next.appPort, chunkPath)
           expect(res.status).toBe(200)
         })
       })
@@ -390,7 +390,7 @@ describe.each(['', '/docs'])(
 
         const mismatchedPortRes = await requestInternalDevScript(
           next.appPort,
-          basePath,
+          chunkPath,
           {
             referer: `http://127.0.0.1:${port}/about`,
           }
@@ -399,7 +399,7 @@ describe.each(['', '/docs'])(
 
         const differentHostRes = await requestInternalDevScript(
           next.appPort,
-          basePath,
+          chunkPath,
           {
             referer: 'https://example.vercel.sh/about',
           }
@@ -408,14 +408,11 @@ describe.each(['', '/docs'])(
       })
 
       it('should block no-cors requests without a referer even when origins are configured', async () => {
-        const res = await requestInternalDevScript(next.appPort, basePath)
+        const res = await requestInternalDevScript(next.appPort, chunkPath)
         expect(res.status).toBe(403)
 
         expectBlockedDevResourceMessage(next.cliOutput, {
-          resourcePath: withBasePath(
-            basePath,
-            '/_next/static/chunks/pages/_app.js'
-          ),
+          resourcePath: chunkPath,
           unknownSource: true,
         })
       })

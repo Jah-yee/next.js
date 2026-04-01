@@ -231,7 +231,11 @@ function generateImgAttrs({
   loader,
 }: GenImgAttrsData): GenImgAttrsResult {
   if (unoptimized) {
-    if (src.startsWith('/') && !src.startsWith('//')) {
+    if (
+      src.startsWith('/') &&
+      !src.startsWith('//') &&
+      !src.startsWith('/_next/immutable/')
+    ) {
       let deploymentId = getDeploymentId()
       if (deploymentId) {
         // We unfortunately can't easily use `new URL()` here, because it normalizes the URL which causes

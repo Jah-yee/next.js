@@ -315,7 +315,7 @@ describe('app dir - next/font', () => {
             expect(link.crossorigin).toBe('')
             if (process.env.IS_TURBOPACK_TEST) {
               expect(link.href).toMatch(
-                /\/_next\/static\/media\/(.*)-s.p.(.*)\.woff2/
+                /\/_next\/(static|immutable)\/media\/(.*)-s.p.(.*)\.woff2/
               )
             } else {
               expect(link.href).toMatch(
@@ -340,7 +340,7 @@ describe('app dir - next/font', () => {
             expect(link.crossorigin).toBe('')
             if (process.env.IS_TURBOPACK_TEST) {
               expect(link.href).toMatch(
-                /\/_next\/static\/media\/(.*)-s.p.(.*)\.woff2/
+                /\/_next\/(static|immutable)\/media\/(.*)-s.p.(.*)\.woff2/
               )
             } else {
               expect(link.href).toMatch(
@@ -365,7 +365,7 @@ describe('app dir - next/font', () => {
             expect(link.crossorigin).toBe('')
             if (process.env.IS_TURBOPACK_TEST) {
               expect(link.href).toMatch(
-                /\/_next\/static\/media\/(.*)-s.p.(.*)\.woff2/
+                /\/_next\/(static|immutable)\/media\/(.*)-s.p.(.*)\.woff2/
               )
             } else {
               expect(link.href).toMatch(
@@ -390,7 +390,7 @@ describe('app dir - next/font', () => {
             expect(link.crossorigin).toBe('')
             if (process.env.IS_TURBOPACK_TEST) {
               expect(link.href).toMatch(
-                /\/_next\/static\/media\/(.*)-s.p.(.*)\.woff2/
+                /\/_next\/(static|immutable)\/media\/(.*)-s.p.(.*)\.woff2/
               )
             } else {
               expect(link.href).toMatch(

@@ -388,6 +388,21 @@ async function exportAppImpl(
       )
   }
 
+  // Copy .next/immutable directory (Turbopack output)
+  if (!options.buildExport && existsSync(join(distDir, 'immutable'))) {
+    if (!options.silent) {
+      Log.info('Copying "immutable build" directory')
+    }
+    await span
+      .traceChild('copy-next-immutable-directory')
+      .traceAsyncFn(() =>
+        recursiveCopy(
+          join(distDir, 'immutable'),
+          join(outDir, '_next', 'immutable')
+        )
+      )
+  }
+
   // Get the exportPathMap from the config file
   if (typeof nextConfig.exportPathMap !== 'function') {
     nextConfig.exportPathMap = async (defaultMap) => {
