@@ -97,12 +97,14 @@ describe('minified module ids', () => {
         ssrBundles += output
       }
 
-      const staticPath = join(appDir, `${getDistDir()}/static/chunks/`)
-      const staticBundleBasenames = (await fs.readdir(staticPath)).filter((p) =>
-        p.match(/\.js$/)
-      )
+      const staticBundleBasenames = (
+        await listClientChunks(join(appDir, getDistDir()))
+      ).filter((p) => p.endsWith('.js'))
       for (const basename of staticBundleBasenames) {
-        const output = await fs.readFile(join(staticPath, basename), 'utf8')
+        const output = await fs.readFile(
+          join(appDir, getDistDir(), basename),
+          'utf8'
+        )
         staticBundles += output
       }
     })
