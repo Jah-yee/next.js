@@ -63,13 +63,12 @@ use crate::{
         storage::Storage,
         storage_schema::{TaskStorage, TaskStorageAccessors},
     },
-    backing_storage::{BackingStorage, SnapshotItem},
+    backing_storage::{BackingStorage, SnapshotItem, compute_task_type_hash},
     data::{
         ActivenessState, CellRef, CollectibleRef, CollectiblesRef, Dirtyness, InProgressCellState,
         InProgressState, InProgressStateInner, OutputValue, TransientTask,
     },
     error::TaskError,
-    kv_backing_storage::compute_task_type_hash,
     utils::{
         arc_or_owned::ArcOrOwned,
         dash_map_drop_contents::drop_contents,

@@ -14,12 +14,11 @@ use turbo_tasks::{
     panic_hooks::{PanicHookGuard, register_panic_hook},
     parallel,
 };
-use turbo_tasks_hash::Xxh3Hash64Hasher;
 
 use crate::{
     GitVersionInfo,
     backend::{AnyOperation, SpecificTaskDataCategory, storage_schema::TaskStorage},
-    backing_storage::{BackingStorage, BackingStorageSealed, SnapshotItem},
+    backing_storage::{BackingStorage, BackingStorageSealed, SnapshotItem, compute_task_type_hash},
     database::{
         db_invalidation::{StartupCacheState, check_db_invalidation_and_cleanup, invalidate_db},
         db_versioning::handle_db_versioning,
@@ -426,26 +425,6 @@ fn save_infra<'a>(
     Ok(())
 }
 
-pub type TaskTypeHash = [u8; 8];
-/// Computes a deterministic 64-bit hash of a CachedTaskType for use as a TaskCache key.
-///
-/// This encodes the task type directly to a hasher, avoiding intermediate buffer allocation.
-/// The encoding is deterministic (function IDs from registry, bincode argument encoding).
-pub fn compute_task_type_hash(task_type: &CachedTaskType) -> TaskTypeHash {
-    let mut hasher = Xxh3Hash64Hasher::new();
-    task_type.hash_encode(&mut hasher);
-    let hash = hasher.finish();
-    if cfg!(feature = "verify_serialization") {
-        task_type.hash_encode(&mut hasher);
-        let hash2 = hasher.finish();
-        assert_eq!(
-            hash, hash2,
-            "Hashing TaskType twice was non-deterministic: \n{:?}\ngot hashes {} != {}",
-            task_type, hash, hash2
-        );
-    }
-    hash.to_le_bytes()
-}
 #[cfg(test)]
 mod tests {
     use std::borrow::Borrow;

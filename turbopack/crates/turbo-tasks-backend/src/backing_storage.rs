@@ -5,11 +5,11 @@ use either::Either;
 use smallvec::SmallVec;
 use turbo_bincode::TurboBincodeBuffer;
 use turbo_tasks::{TaskId, backend::CachedTaskType};
+use turbo_tasks_hash::Xxh3Hash64Hasher;
 
-use crate::{
-    backend::{AnyOperation, SpecificTaskDataCategory, storage_schema::TaskStorage},
-    kv_backing_storage::TaskTypeHash,
-};
+use crate::backend::{AnyOperation, SpecificTaskDataCategory, storage_schema::TaskStorage};
+
+pub type TaskTypeHash = [u8; 8];
 
 /// A single item yielded by the snapshot iterator during persistence.
 pub struct SnapshotItem {
@@ -26,6 +26,26 @@ impl SnapshotItem {
     pub fn is_empty(&self) -> bool {
         self.meta.is_none() && self.data.is_none() && self.task_type_hash.is_none()
     }
+}
+
+/// Computes a deterministic 64-bit hash of a CachedTaskType for use as a TaskCache key.
+///
+/// This encodes the task type directly to a hasher, avoiding intermediate buffer allocation.
+/// The encoding is deterministic (function IDs from registry, bincode argument encoding).
+pub fn compute_task_type_hash(task_type: &CachedTaskType) -> TaskTypeHash {
+    let mut hasher = Xxh3Hash64Hasher::new();
+    task_type.hash_encode(&mut hasher);
+    let hash = hasher.finish();
+    if cfg!(feature = "verify_serialization") {
+        task_type.hash_encode(&mut hasher);
+        let hash2 = hasher.finish();
+        assert_eq!(
+            hash, hash2,
+            "Hashing TaskType twice was non-deterministic: \n{:?}\ngot hashes {} != {}",
+            task_type, hash, hash2
+        );
+    }
+    hash.to_le_bytes()
 }
 
 /// Represents types accepted by [`TurboTasksBackend::new`]. Typically this is the value returned by

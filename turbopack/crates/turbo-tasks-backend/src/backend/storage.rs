@@ -155,16 +155,16 @@ impl Storage {
         // The number of shards is much larger than the number of threads, so the effect of the
         // locks held is negligible.
         parallel::map_collect::<_, _, Vec<_>>(&shards, |&(shard_idx, shard)| {
-            // Skip shards with no modifications. The count is approximate (not synchronized
-            // with flag clearing), but false positives just mean we scan an extra shard.
-            if self.shard_modified_counts[shard_idx].load(Ordering::Relaxed) == 0 {
+            // Check how many modifications there are in this shard, because we have entered
+            // snapshot_mode, there are no racing writes
+            // So we can safely clear it out now that we are processing the modifications
+            let modified_count = self.shard_modified_counts[shard_idx].swap(0, Ordering::Relaxed);
+            if modified_count == 0 {
                 return None;
             }
-            // Reset the count now that we're processing this shard. end_snapshot
-            // will re-increment for any tasks that still have modifications.
-            self.shard_modified_counts[shard_idx].store(0, Ordering::Relaxed);
             let mut direct_snapshots: Vec<(TaskId, Box<TaskStorage>)> = Vec::new();
-            let mut modified: SmallVec<[TaskId; 4]> = SmallVec::new();
+            let mut modified: SmallVec<[TaskId; 4]> =
+                SmallVec::with_capacity(modified_count as usize);
             {
                 let shard_guard = shard.read();
                 // Safety: shard_guard must outlive the iterator.
@@ -185,15 +185,18 @@ impl Storage {
                             shared_value.get().get_persistent_task_type()
                         );
 
-                        if let Some(mut snapshot) = self.snapshots.get_mut(key) {
-                            if let Some(snapshot) = snapshot.take() {
-                                direct_snapshots.push((*key, snapshot));
-                            }
-                            // Do NOT clear flags here. The original in the map may have
-                            // accumulated mutations during snapshot mode that aren't fully
-                            // covered by modified_during_snapshot (e.g. meta was modified
-                            // pre-snapshot but only data was modified during snapshot).
-                            // end_snapshot handles these tasks via the snapshots map.
+                        if flags.any_modified_during_snapshot() {
+                            // Task was modified during snapshot mode, so a snapshot
+                            // copy must exist in the snapshots map (created by the
+                            // (true, true) case in track_modification_internal).
+                            let mut snapshot = self.snapshots.get_mut(key).expect(
+                                "task with modified_during_snapshot must have a snapshots entry",
+                            );
+                            let snapshot = snapshot.take().expect(
+                                "snapshot entry for modified_during_snapshot task must contain a \
+                                 value",
+                            );
+                            direct_snapshots.push((*key, snapshot));
                         } else {
                             modified.push(*key);
                         }
@@ -395,7 +398,12 @@ impl StorageWriteGuard<'_> {
             }
             (true, false) => {
                 // In snapshot mode and item is unmodified (so it's not part of the snapshot)
-                // Mark it so it gets re-added as Modified after this snapshot completes
+                // Mark it so it gets re-added as Modified after this snapshot completes.
+                // Insert a None entry into snapshots so end_snapshot discovers this task
+                // and promotes its _during_snapshot flags.
+                if !flags.any_modified_during_snapshot() {
+                    self.storage.snapshots.insert(*self.inner.key(), None);
+                }
                 self.inner
                     .flags
                     .set_modified_during_snapshot(category, true);
@@ -553,10 +561,21 @@ where
     type Item = SnapshotItem;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // direct_snapshots: flags were already cleared in take_snapshot while holding
-        // the shard write lock. We just encode from the owned snapshot copy.
+        // direct_snapshots: these tasks had a snapshot copy created by
+        // track_modification. We encode from the owned snapshot copy and
+        // clear the stale modified flags; end_snapshot handles _during_snapshot
+        // promotion.
         while let Some((task_id, snapshot)) = self.shard.direct_snapshots.pop() {
             let item = (self.shard.process)(task_id, &snapshot, &mut self.buffer);
+            // Clear pre-snapshot modified/new_task flags on the live task.
+            // The snapshot copy captured these; _during_snapshot flags remain
+            // for end_snapshot to promote.
+            {
+                let mut inner = self.shard.storage.map.get_mut(&task_id).unwrap();
+                inner.flags.set_data_modified(false);
+                inner.flags.set_meta_modified(false);
+                inner.flags.set_new_task(false);
+            }
             if !item.is_empty() {
                 return Some(item);
             }
