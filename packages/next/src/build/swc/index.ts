@@ -1381,15 +1381,6 @@ async function loadWasm(importPath = '') {
             `Use the --webpack flag instead.`
         )
       },
-      startTurbopackTraceServer(
-        _traceFilePath: string,
-        _port: number | undefined
-      ): void {
-        throw new Error(
-          `Turbopack trace server is not supported on this platform (${PlatformName}/${ArchName}) because native bindings are not available. ` +
-            `Only WebAssembly (WASM) bindings were loaded, and Turbopack requires native bindings.`
-        )
-      },
       startTurbopackTraceServerHandle(
         _traceFilePath: string,
         _port: number | undefined
@@ -1645,15 +1636,6 @@ function loadNative(importPath?: string): Binding {
           customBindingsPath ?? bindingsPath!,
           false
         ),
-        startTurbopackTraceServer(traceFilePath, port) {
-          Log.warn(
-            `Turbopack trace server started. View trace at https://trace.nextjs.org${port != null ? `?port=${port}` : ''}`
-          )
-          ;(customBindings ?? bindings).startTurbopackTraceServer(
-            traceFilePath,
-            port
-          )
-        },
         startTurbopackTraceServerHandle(traceFilePath, port) {
           return (customBindings ?? bindings).startTurbopackTraceServerHandle(
             traceFilePath,
