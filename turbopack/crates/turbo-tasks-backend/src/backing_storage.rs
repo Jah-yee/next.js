@@ -37,6 +37,7 @@ pub fn compute_task_type_hash(task_type: &CachedTaskType) -> TaskTypeHash {
     task_type.hash_encode(&mut hasher);
     let hash = hasher.finish();
     if cfg!(feature = "verify_serialization") {
+        hasher = Xxh3Hash64Hasher::new();
         task_type.hash_encode(&mut hasher);
         let hash2 = hasher.finish();
         assert_eq!(
