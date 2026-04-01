@@ -7,6 +7,7 @@ import {
   findPort,
   killApp,
   launchApp,
+  listClientChunks,
   nextBuild,
   nextStart,
   renderViaHTTP,
@@ -146,20 +147,13 @@ describe('should handle unresolved files gracefully', () => {
       })
 
       it('should have correct file references in CSS output', async () => {
-        const cssFolder = join(workDir, '.next', 'static')
-        const cssFiles = nodeFs
-          .readdirSync(cssFolder, {
-            recursive: true,
-            encoding: 'utf8',
-          })
-          .filter((f) => f.endsWith('.css'))
-          // Ensure the loop is more deterministic
-          .sort()
-
+        const cssFiles = (
+          await listClientChunks(join(workDir, '.next'))
+        ).filter((f) => f.endsWith('.css'))
         expect(cssFiles).not.toBeEmpty()
 
         for (const file of cssFiles) {
-          const content = await readFile(join(cssFolder, file), 'utf8')
+          const content = await readFile(join(workDir, '.next', file), 'utf8')
 
           const svgCount = content.match(/\(\/vercel\.svg/g).length
           expect(svgCount === 1 || svgCount === 2).toBe(true)
