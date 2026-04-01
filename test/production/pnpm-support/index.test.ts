@@ -100,6 +100,11 @@ describe('pnpm support', () => {
         path.join(standaloneDir, './.next/static'),
         { overwrite: true }
       )
+      await fs.copy(
+        path.join(next.testDir, './.next/immutable'),
+        path.join(standaloneDir, './.next/immutable'),
+        { overwrite: true }
+      )
       server = await initNextServerScript(
         path.join(standaloneDir, 'server.js'),
         /- Local:/,
