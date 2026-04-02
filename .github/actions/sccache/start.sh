@@ -26,8 +26,8 @@ pkill -9 -x cargo 2>/dev/null || true
 pkill -9 -x rustc 2>/dev/null || true
 
 # Install sccache via turbo task (cached by scripts/sccache-version).
-TURBO="pnpm dlx turbo@${TURBO_VERSION:-latest}"
-$TURBO run build-sccache ${TURBO_ARGS:-}
+npm i -g "turbo@${TURBO_VERSION:-2.9.4-canary.3}" 2>/dev/null || true
+turbo run build-sccache ${TURBO_ARGS:-}
 SCCACHE_PATH="${GITHUB_WORKSPACE}/target/sccache/bin"
 export PATH="${SCCACHE_PATH}:${PATH}"
 echo "${SCCACHE_PATH}" >> "$GITHUB_PATH"

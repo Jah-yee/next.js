@@ -92,7 +92,7 @@ on:
         default: 'chromium'
 env:
   NAPI_CLI_VERSION: 2.18.4
-  TURBO_VERSION: 2.8.11
+  TURBO_VERSION: 2.9.4-canary.3
   TURBO_ARGS: '-v --env-mode loose --remote-cache-timeout 300 --log-order stream'
   NODE_LTS_VERSION: 20.9.0
   # run-tests.js reads `TEST_CONCURRENCY` if no explicit `--concurrency` or `-c`
@@ -278,6 +278,9 @@ jobs:
 
       - run: pnpm install
         if: ${{ inputs.skipInstallBuild != 'yes' }}
+
+      - name: Install turbo canary
+        run: npm i -g "turbo@${TURBO_VERSION}"
 
       - name: Install node-file-trace test dependencies
         if: ${{ inputs.needsNextest == 'yes' }}

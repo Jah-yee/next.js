@@ -91,6 +91,8 @@ jobs:
           hyperfine --min-runs 1 --show-output 'pnpm run --filter=@next/swc build-native --features plugin --release'
           echo "Successfully built next-swc with published turbopack"
 
+      - run: npm i -g turbo@2.9.4-canary.3
+
       - name: Build next.js
         run: |
           pnpm run build
