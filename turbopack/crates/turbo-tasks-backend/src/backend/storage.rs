@@ -8,7 +8,6 @@ use std::{
     },
 };
 
-use smallvec::SmallVec;
 use thread_local::ThreadLocal;
 use turbo_bincode::TurboBincodeBuffer;
 use turbo_tasks::{FxDashMap, TaskId, parallel};
@@ -80,7 +79,7 @@ pub struct Storage {
     /// - `Some(snapshot)`: Task was modified before snapshot mode and accessed again during it.
     ///   Contains a copy of the pre-snapshot state that needs to be persisted.
     /// - `None`: Task was first modified during snapshot mode (not part of current snapshot). Will
-    ///   be added to modified list for the next snapshot cycle.
+    ///   be marked as modified at the beginning of the next snapshot cycle.
     snapshots: FxDashMap<TaskId, Option<Box<TaskStorage>>>,
     map: FxDashMap<TaskId, Box<TaskStorage>>,
 }
@@ -107,6 +106,9 @@ impl Storage {
             snapshot_mode: AtomicBool::new(false),
             shard_modified_counts,
             snapshots: FxDashMap::with_capacity_and_hasher_and_shard_amount(
+                // We expect very few updates to this map since it will only happen when updates
+                // race with snapshots.  This never happens in a build and only rarely happens in
+                // dev sessions
                 0,
                 Default::default(),
                 shard_amount,
@@ -190,8 +192,7 @@ impl Storage {
                 return None;
             }
             let mut direct_snapshots: Vec<(TaskId, Box<TaskStorage>)> = Vec::new();
-            let mut modified: SmallVec<[TaskId; 4]> =
-                SmallVec::with_capacity(modified_count as usize);
+            let mut modified = Vec::with_capacity(modified_count as usize);
             {
                 let shard_guard = shard.read();
                 // Safety: shard_guard must outlive the iterator.
@@ -296,6 +297,10 @@ impl Storage {
         // Promote modified_during_snapshot → modified for tasks that had snapshots.
         // The snapshots map should be small (only tasks concurrently accessed during snapshot
         // mode). Increment the per-shard modified counts for promoted tasks.
+
+        // Lock Ordering: Note, in track_modification_internal, we modify the snapshots map while
+        // holding a StorageWriteGuard and here we do the opposite.  This is fine because that code
+        // only runs when `snapshot_mode==true` and this loop only runs when it is false.
         parallel::for_each(self.snapshots.shards(), |shard| {
             let mut shard_guard = shard.write();
             for (key, _) in shard_guard.drain() {
@@ -351,7 +356,7 @@ impl Storage {
 
     pub fn drop_contents(&self) {
         drop_contents(&self.map);
-        self.snapshots.clear();
+        drop_contents(&self.snapshots);
     }
 }
 
@@ -540,7 +545,7 @@ impl Drop for SnapshotGuard<'_> {
 
 pub struct SnapshotShard<'l, P> {
     direct_snapshots: Vec<(TaskId, Box<TaskStorage>)>,
-    modified: SmallVec<[TaskId; 4]>,
+    modified: Vec<TaskId>,
     storage: &'l Storage,
     process: &'l P,
     /// Held for its `Drop` impl — ensures snapshot mode ends when all shards are done.
@@ -596,14 +601,10 @@ where
                     .promote_during_snapshot_flags(&task_id, &mut inner);
                 return Some(item);
             } else {
-                // Encoding failed or task type missing — don't clear flags so the
-                // task stays dirty and gets retried on the next snapshot cycle.
-                // Re-increment the shard count (reset to 0 at take_snapshot).
+                // Error path: encoding failed. Re-mark dirty for next cycle.
+                std::hint::cold_path();
                 let shard_idx = self.shard.storage.shard_index(&task_id);
                 self.shard.storage.shard_modified_counts[shard_idx].fetch_add(1, Ordering::Relaxed);
-                // We still need to promote _during_snapshot flags since we already
-                // removed this task from the snapshots map and other categories might need to get
-                // tagged
                 self.shard
                     .storage
                     .promote_during_snapshot_flags(&task_id, &mut inner);
@@ -621,8 +622,8 @@ where
                     inner.flags.set_new_task(false);
                     return Some(item);
                 }
-                // Encoding failed — leave flags set so the task is retried.
-                // Re-increment the shard count (reset to 0 at take_snapshot).
+                // Error path: encoding failed. Re-mark dirty for next cycle.
+                std::hint::cold_path();
                 let shard_idx = self.shard.storage.shard_index(&task_id);
                 self.shard.storage.shard_modified_counts[shard_idx].fetch_add(1, Ordering::Relaxed);
             } else {

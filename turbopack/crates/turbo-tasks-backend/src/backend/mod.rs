@@ -1282,17 +1282,14 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
                 None
             };
             let task_type_hash = if inner.flags.new_task() {
-                let Some(task_type) = inner.get_persistent_task_type() else {
-                    // This implies that a task was allocated but not yet connected to its
-                    // task_type before getting snapshotted. This should be nearly impossible.
-                    // Return an empty item which will be filtered out downstream.
-                    return SnapshotItem {
-                        task_id,
-                        meta: None,
-                        data: None,
-                        task_type_hash: None,
-                    };
-                };
+                let task_type = inner.get_persistent_task_type().expect(
+                    "It is not possible for a new_task to not have a persistent_task_type.  Task \
+                     creation for persistent tasks uses a single ExecutionContextImpl for \
+                     creating the task (which sets new_task) and connect_child (which sets \
+                     persistent_task_type) and take_snapshot waits for all operations to complete \
+                     or suspend before we start snapshotting.  So task creation will always set \
+                     the task_type.",
+                );
                 Some(compute_task_type_hash(task_type))
             } else {
                 None
@@ -1314,8 +1311,9 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
         let task_count = task_snapshots.len();
 
         if task_snapshots.is_empty() {
-            // This is only possible if the `modified_count` and actual modifications get out of
-            // sync with each other.
+            // This should be impossible — if we got here, modified_count was nonzero, and every
+            // modification that increments the count also failed during encoding.
+            std::hint::cold_path();
             return Some((snapshot_time, false));
         }
 
@@ -1578,8 +1576,10 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
                     // We're creating a new task.
                     let task_type = Arc::new(task_type);
                     let task_id = self.persisted_task_id_factory.get();
-                    self.storage.initialize_new_task(task_id);
                     e.insert(task_type.clone(), task_id);
+                    // Mark the task as new in storage.
+                    // Do this after e.insert so we aren't holding the task_cache lock
+                    self.storage.initialize_new_task(task_id);
                     // insert() consumes e, releasing the lock
                     self.track_cache_miss(&task_type);
                     is_new = true;
@@ -1645,8 +1645,8 @@ impl<B: BackingStorage> TurboTasksBackendInner<B> {
             RawEntry::Vacant(e) => {
                 let task_type = Arc::new(task_type);
                 let task_id = self.transient_task_id_factory.get();
-                self.storage.initialize_new_task(task_id);
                 e.insert(task_type.clone(), task_id);
+                self.storage.initialize_new_task(task_id);
                 self.track_cache_miss(&task_type);
 
                 self.set_initial_aggregation_number(

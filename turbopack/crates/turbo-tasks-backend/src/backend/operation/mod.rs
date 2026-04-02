@@ -169,10 +169,10 @@ impl<'e, B: BackingStorage> ExecuteContextImpl<'e, B> {
         task_id: TaskId,
         category: SpecificTaskDataCategory,
     ) -> TaskStorage {
-        if !self.backend.should_restore() {
-            return TaskStorage::default();
-        }
         let mut storage = TaskStorage::default();
+        if !self.backend.should_restore() {
+            return storage;
+        }
         let result = self
             .backend
             .backing_storage
@@ -393,8 +393,8 @@ impl<'e, B: BackingStorage> ExecuteContext<'e> for ExecuteContextImpl<'e, B> {
             // New tasks (transient and persistent) have restored flags set at allocation
             // time, so this path is only hit for persistent tasks being restored from DB.
             debug_assert!(
-                !task_id.is_transient(),
-                "transient task should already be restored"
+                !task.flags.new_task() && !task_id.is_transient(),
+                "new or transient task should already be marked restored"
             );
 
             // Collect which categories need restoring while we have the lock
