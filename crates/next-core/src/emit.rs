@@ -238,8 +238,8 @@ async fn assets_diff(
                     }
                 }
                 _ => Some(
-                    "assets at the same path have mismatched file content types (one is NotFound, \
-                     the other has content)"
+                    "assets at the same path have mismatched file content types (one task wants \
+                     to write the file, another wants to delete it)"
                         .into(),
                 ),
             }
