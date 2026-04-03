@@ -1,10 +1,11 @@
 use anyhow::{Ok, Result, bail};
 use futures::join;
-use turbo_rcstr::{RcStr, rcstr};
+use turbo_rcstr::RcStr;
 use turbo_tasks::{
     FxIndexMap, ResolvedVc, TryFlatJoinIterExt, TryJoinIterExt, ValueToStringRef, Vc,
 };
 use turbo_tasks_fs::{FileContent, FileSystemPath, rebase};
+use turbo_tasks_hash::{encode_hex, hash_xxh3_hash64};
 use turbopack_core::{
     asset::{Asset, AssetContent},
     output::{ExpandedOutputAssets, OutputAsset, OutputAssets},
@@ -90,11 +91,15 @@ pub async fn emit_assets(
     async fn check_duplicates(
         path: &FileSystemPath,
         assets: Vec<ResolvedVc<Box<dyn OutputAsset>>>,
+        node_root: &FileSystemPath,
     ) -> Result<ResolvedVc<Box<dyn OutputAsset>>> {
         let mut iter = assets.into_iter();
         let first = iter.next().unwrap();
         for next in iter {
-            if let Some(diff) = assets_diff(*next, *first).owned().await? {
+            if let Some(diff) = assets_diff(*next, *first, path.clone(), node_root.clone())
+                .owned()
+                .await?
+            {
                 bail!(
                     "Duplicate asset with different content: {}\n{}",
                     path.to_string_ref().await?,
@@ -111,14 +116,14 @@ pub async fn emit_assets(
         node_assets_by_path
             .into_iter()
             .map(async |(path, assets)| {
-                let asset = check_duplicates(&path, assets).await?;
+                let asset = check_duplicates(&path, assets, &node_root).await?;
                 emit(*asset).as_side_effect().await
             })
             .try_join(),
         client_assets_by_path
             .into_iter()
             .map(async |(path, assets)| {
-                let asset = check_duplicates(&path, assets).await?;
+                let asset = check_duplicates(&path, assets, &node_root).await?;
                 // Client assets are emitted to the client output path, which is prefixed
                 // with _next. We need to rebase them to remove that
                 // prefix.
@@ -172,6 +177,8 @@ async fn emit_rebase(
 async fn assets_diff(
     assets1: Vc<Box<dyn OutputAsset>>,
     assets2: Vc<Box<dyn OutputAsset>>,
+    asset_path: FileSystemPath,
+    node_root: FileSystemPath,
 ) -> Result<Vc<Option<RcStr>>> {
     let content1 = assets1.content().await?;
     let content2 = assets2.content().await?;
@@ -183,16 +190,46 @@ async fn assets_diff(
 
             match (&*content1, &*content2) {
                 (FileContent::NotFound, FileContent::NotFound) => Ok(Vc::cell(None)),
-                (FileContent::Content(content1), FileContent::Content(content2)) => {
-                    if content1 == content2 {
+                (FileContent::Content(file1), FileContent::Content(file2)) => {
+                    if file1 == file2 {
                         Ok(Vc::cell(None))
                     } else {
-                        // TODO: Produce an actual diff, e.g. write both versions to
-                        // scratch space under `.next/` and run a text diff on them.
-                        Ok(Vc::cell(Some(rcstr!("file content differs"))))
+                        // Write both versions under node_root as <hash>.<ext> so the
+                        // user can diff them.
+                        let ext = asset_path.extension();
+                        let hash1 = encode_hex(hash_xxh3_hash64(file1.content().content_hash()));
+                        let hash2 = encode_hex(hash_xxh3_hash64(file2.content().content_hash()));
+                        let name1 = if ext.is_empty() {
+                            hash1
+                        } else {
+                            format!("{hash1}.{ext}")
+                        };
+                        let name2 = if ext.is_empty() {
+                            hash2
+                        } else {
+                            format!("{hash2}.{ext}")
+                        };
+                        let path1 = node_root.join(&name1)?;
+                        let path2 = node_root.join(&name2)?;
+                        path1
+                            .write(FileContent::Content(file1.clone()).cell())
+                            .as_side_effect()
+                            .await?;
+                        path2
+                            .write(FileContent::Content(file2.clone()).cell())
+                            .as_side_effect()
+                            .await?;
+                        Ok(Vc::cell(Some(
+                            format!(
+                                "file content differs, written to:\n  {}\n  {}",
+                                path1.to_string_ref().await?,
+                                path2.to_string_ref().await?,
+                            )
+                            .into(),
+                        )))
                     }
                 }
-                _ => Ok(Vc::cell(Some(rcstr!("file content type differs")))),
+                _ => Ok(Vc::cell(Some("file content type differs".into()))),
             }
         }
         (
@@ -213,6 +250,6 @@ async fn assets_diff(
                 )))
             }
         }
-        _ => Ok(Vc::cell(Some(rcstr!("asset content type differs")))),
+        _ => Ok(Vc::cell(Some("asset content type differs".into()))),
     }
 }
