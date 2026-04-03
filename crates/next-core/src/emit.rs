@@ -235,7 +235,11 @@ async fn assets_diff(
                         ))
                     }
                 }
-                _ => Some("file content type differs".into()),
+                _ => Some(
+                    "assets at the same path have mismatched file content types (one is NotFound, \
+                     the other has content)"
+                        .into(),
+                ),
             }
         }
         (
@@ -251,10 +255,17 @@ async fn assets_diff(
             if target1 == target2 && link_type1 == link_type2 {
                 None
             } else {
-                Some(format!("redirect differs: {} vs {}", target1, target2))
+                Some(format!(
+                    "assets at the same path are both redirects but point to different targets: \
+                     {target1} vs {target2}"
+                ))
             }
         }
-        _ => Some("asset content type differs".into()),
+        _ => Some(
+            "assets at the same path have different content types (one is a file, the other is a \
+             redirect)"
+                .into(),
+        ),
     };
 
     Ok(Vc::cell(detail.map(|d| d.into())))
@@ -283,12 +294,11 @@ impl Issue for EmitConflictIssue {
     }
 
     #[turbo_tasks::function]
-    async fn title(&self) -> Result<Vc<StyledString>> {
-        Ok(StyledString::Line(vec![
-            StyledString::Text("Duplicate asset with different content: ".into()),
-            StyledString::Code(self.asset_path.to_string().into()),
-        ])
-        .cell())
+    fn title(&self) -> Vc<StyledString> {
+        StyledString::Text(
+            "Two or more assets with different content were emitted to the same output path".into(),
+        )
+        .cell()
     }
 
     #[turbo_tasks::function]
