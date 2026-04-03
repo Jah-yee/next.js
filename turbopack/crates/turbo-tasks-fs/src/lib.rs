@@ -1246,7 +1246,7 @@ impl FileSystem for DiskFileSystem {
                             .with_context(err_context)?;
                     }
                     OsSpecificLinkContent::Invalid => {
-                        return Err(anyhow!("invalid symlink target: {full_path:?}"));
+                        bail!("invalid symlink target: {full_path:?}");
                     }
                     OsSpecificLinkContent::NotFound => {
                         retry_blocking(|| remove_symbolic_link_dir_helper(&full_path))

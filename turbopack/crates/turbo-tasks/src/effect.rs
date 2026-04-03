@@ -1,9 +1,10 @@
 use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, bail};
 use auto_hash_map::AutoSet;
 use dashmap::DashMap;
 use futures::{StreamExt, TryStreamExt};
+use parking_lot::Mutex;
 use rustc_hash::FxHashSet;
 use tracing::Instrument;
 
@@ -32,14 +33,31 @@ pub trait Effect: TraceRawVcs + NonLocalValue + Send + Sync + 'static {
     fn apply(&self) -> impl Future<Output = Result<()>> + Send;
 }
 
+/// Per-key entry in the effect state storage.
+///
+/// - `last_applied`: the value that was last successfully written (sync-readable for fast-path
+///   dedup)
+/// - `write_lock`: async mutex held during the actual write; ensures only one concurrent write per
+///   key
+struct EffectStateEntry {
+    last_applied: Mutex<Option<Box<dyn Any + Send + Sync>>>,
+    write_lock: tokio::sync::Mutex<()>,
+}
+
+impl Default for EffectStateEntry {
+    fn default() -> Self {
+        Self {
+            last_applied: Mutex::new(None),
+            write_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
 /// Shared state storage for tracking applied effects. Stored on the filesystem implementation
 /// (e.g. DiskFileSystemInner).
 #[derive(Default)]
 pub struct EffectStateStorage {
-    /// Tracks the last applied effect value per key (Vec<u8>).
-    /// The `Arc<tokio::sync::Mutex<Option<...>>>` provides per-key async locking during apply,
-    /// ensuring that two effects for the same key don't run concurrently.
-    effect_state: DashMap<Vec<u8>, Arc<tokio::sync::Mutex<Option<Box<dyn Any + Send + Sync>>>>>,
+    effect_state: DashMap<Vec<u8>, Arc<EffectStateEntry>>,
 }
 
 // Private wrapper trait to allow dynamic dispatch of an `Effect`. This is similar to the pattern
@@ -234,10 +252,10 @@ impl Effects {
                     let first_value = effects[0].value_dyn();
                     for other in &effects[1..] {
                         if !other.eq_value_dyn(&*first_value) {
-                            return Err(anyhow!(
+                            bail!(
                                 "Conflicting effects for the same key (key length: {} bytes)",
                                 key.len()
-                            ));
+                            );
                         }
                     }
                 }
@@ -252,19 +270,31 @@ impl Effects {
                     let key = effect.key();
                     let state_storage = effect.state_storage();
 
-                    // Get or insert per-key mutex from the state storage
-                    let mutex = state_storage
+                    // Get or insert per-key entry (fast sync path)
+                    let entry = state_storage
                         .effect_state
-                        .entry(key.clone())
-                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
+                        .entry(key)
+                        .or_insert_with(|| Arc::new(EffectStateEntry::default()))
                         .clone();
 
-                    // Lock the per-key mutex (waits for any in-progress write to the same key)
-                    let mut guard = mutex.lock().await;
+                    // Fast path: check if the stored value already matches (sync, no await)
+                    {
+                        let stored = entry.last_applied.lock();
+                        if let Some(stored_val) = stored.as_ref()
+                            && effect.eq_value_dyn(&**stored_val)
+                        {
+                            return Ok(());
+                        }
+                    }
 
-                    // Compare against stored value — skip if already applied with same value
-                    if let Some(stored) = guard.as_ref() {
-                        if effect.eq_value_dyn(&**stored) {
+                    // Slow path: acquire the write lock and re-check before writing
+                    let _write_guard = entry.write_lock.lock().await;
+
+                    {
+                        let stored = entry.last_applied.lock();
+                        if let Some(stored_val) = stored.as_ref()
+                            && effect.eq_value_dyn(&**stored_val)
+                        {
                             return Ok(());
                         }
                     }
@@ -272,8 +302,8 @@ impl Effects {
                     // Apply the effect
                     effect.dyn_apply().await?;
 
-                    // Store the new value
-                    *guard = Some(effect.value_dyn());
+                    // Store the new value (sync)
+                    *entry.last_applied.lock() = Some(effect.value_dyn());
 
                     Ok(())
                 })
