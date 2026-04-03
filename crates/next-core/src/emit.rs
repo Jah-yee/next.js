@@ -1,6 +1,6 @@
 use anyhow::{Ok, Result};
 use futures::join;
-use turbo_rcstr::{RcStr, rcstr};
+use turbo_rcstr::RcStr;
 use turbo_tasks::{
     FxIndexMap, ResolvedVc, TryFlatJoinIterExt, TryJoinIterExt, ValueToStringRef, Vc,
 };
@@ -101,9 +101,17 @@ pub async fn emit_assets(
         let first = iter.next().unwrap();
         for next in iter {
             let ext: RcStr = path.extension().into();
-            check_emit_conflict(*next, *first, ext, path.clone(), node_root.clone())
-                .as_side_effect()
-                .await?;
+            if let Some(detail) = assets_diff(*next, *first, ext, node_root.clone())
+                .owned()
+                .await?
+            {
+                EmitConflictIssue {
+                    asset_path: path.clone(),
+                    detail,
+                }
+                .resolved_cell()
+                .emit();
+            }
         }
         Ok(first)
     }
@@ -173,15 +181,14 @@ async fn emit_rebase(
 
 /// Compares two assets that target the same output path. If their content
 /// differs, writes both versions under `node_root` as `<hash>.<ext>` and
-/// emits an `EmitConflictIssue` so the user can diff them.
+/// returns a description of the difference.
 #[turbo_tasks::function]
-async fn check_emit_conflict(
+async fn assets_diff(
     asset1: Vc<Box<dyn OutputAsset>>,
     asset2: Vc<Box<dyn OutputAsset>>,
     extension: RcStr,
-    asset_path: FileSystemPath,
     node_root: FileSystemPath,
-) -> Result<()> {
+) -> Result<Vc<Option<RcStr>>> {
     let content1 = asset1.content().await?;
     let content2 = asset2.content().await?;
 
@@ -250,16 +257,7 @@ async fn check_emit_conflict(
         _ => Some("asset content type differs".into()),
     };
 
-    if let Some(detail) = detail {
-        EmitConflictIssue {
-            asset_path,
-            detail: detail.into(),
-        }
-        .resolved_cell()
-        .emit();
-    }
-
-    Ok(())
+    Ok(Vc::cell(detail.map(|d| d.into())))
 }
 
 #[turbo_tasks::value]
@@ -277,7 +275,7 @@ impl Issue for EmitConflictIssue {
 
     #[turbo_tasks::function]
     fn stage(&self) -> Vc<IssueStage> {
-        IssueStage::Other(rcstr!("emit")).cell()
+        IssueStage::Emit.cell()
     }
 
     fn severity(&self) -> IssueSeverity {
