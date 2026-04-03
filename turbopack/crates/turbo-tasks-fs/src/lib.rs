@@ -36,7 +36,6 @@ use std::{
     borrow::Cow,
     cmp::{Ordering, min},
     env,
-    error::Error as StdError,
     fmt::{self, Debug, Formatter},
     fs::FileType,
     future::Future,
@@ -51,6 +50,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use auto_hash_map::{AutoMap, AutoSet};
 use bincode::{Decode, Encode};
 use bitflags::bitflags;
+use dashmap::DashMap;
 use dunce::simplified;
 use indexmap::IndexSet;
 use jsonc_parser::{ParseOptions, parse_to_serde_value};
@@ -64,10 +64,9 @@ use tokio::{
 use tracing::Instrument;
 use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{
-    ApplyEffectsContext, Completion, Effect, InvalidationReason, Invalidator, NonLocalValue,
-    ReadRef, ResolvedVc, TaskInput, TurboTasksApi, ValueToString, ValueToStringRef, Vc,
-    debug::ValueDebugFormat, emit_effect, parallel, trace::TraceRawVcs, turbo_tasks_weak,
-    turbobail, turbofmt,
+    Completion, Effect, EffectStateStorage, InvalidationReason, NonLocalValue, ReadRef, ResolvedVc,
+    TaskInput, TurboTasksApi, ValueToString, ValueToStringRef, Vc, debug::ValueDebugFormat,
+    emit_effect, parallel, trace::TraceRawVcs, turbo_tasks_weak, turbobail, turbofmt,
 };
 use turbo_tasks_hash::{
     DeterministicHash, DeterministicHasher, HashAlgorithm, deterministic_hash, hash_xxh3_hash64,
@@ -79,8 +78,7 @@ use turbo_unix_path::{
 use crate::{
     attach::AttachedFileSystem,
     glob::Glob,
-    invalidation::Write,
-    invalidator_map::{InvalidatorMap, WriteContent},
+    invalidator_map::InvalidatorMap,
     json::UnparsableJson,
     mutex_map::MutexMap,
     path_map::OrderedPathMapExt,
@@ -241,12 +239,6 @@ pub trait FileSystem: ValueToString {
     fn metadata(self: Vc<Self>, fs_path: FileSystemPath) -> Vc<FileMeta>;
 }
 
-#[derive(Default)]
-struct DiskFileSystemApplyContext {
-    /// A cache of already created directories to avoid creating them multiple times.
-    created_directories: FxHashSet<PathBuf>,
-}
-
 #[derive(TraceRawVcs, ValueDebugFormat, NonLocalValue, Encode, Decode)]
 struct DiskFileSystemInner {
     pub name: RcStr,
@@ -288,6 +280,14 @@ struct DiskFileSystemInner {
     #[turbo_tasks(debug_ignore, trace_ignore)]
     #[bincode(skip, default = "Handle::current")]
     tokio_handle: Handle,
+    #[turbo_tasks(debug_ignore, trace_ignore)]
+    #[bincode(skip)]
+    effect_state_storage: EffectStateStorage,
+    /// Tracks directories already created during effect application (avoids redundant
+    /// create_dir_all).
+    #[turbo_tasks(debug_ignore, trace_ignore)]
+    #[bincode(skip)]
+    created_dirs: DashMap<PathBuf, ()>,
 }
 
 impl DiskFileSystemInner {
@@ -319,37 +319,10 @@ impl DiskFileSystemInner {
     /// has to be called within a turbo-tasks function
     fn register_read_invalidator(&self, path: &Path) -> Result<()> {
         if let Some(invalidator) = turbo_tasks::get_invalidator() {
-            self.invalidator_map
-                .insert(path.to_owned(), invalidator, None);
+            self.invalidator_map.insert(path.to_owned(), invalidator);
             self.watcher.ensure_watched_file(path, self.root_path())?;
         }
         Ok(())
-    }
-
-    /// registers the path as an invalidator for the current task,
-    /// has to be called within a turbo-tasks function. It removes and returns
-    /// the current list of invalidators.
-    fn register_write_invalidator(
-        &self,
-        path: &Path,
-        invalidator: Invalidator,
-        write_content: WriteContent,
-    ) -> Result<Vec<(Invalidator, Option<WriteContent>)>> {
-        let mut invalidator_map = self.invalidator_map.lock().unwrap();
-        let invalidators = invalidator_map.entry(path.to_owned()).or_default();
-        let old_invalidators = invalidators
-            .extract_if(|i, old_write_content| {
-                i == &invalidator
-                    || old_write_content
-                        .as_ref()
-                        .is_none_or(|old| old != &write_content)
-            })
-            .filter(|(i, _)| i != &invalidator)
-            .collect::<Vec<_>>();
-        invalidators.insert(invalidator, Some(write_content));
-        drop(invalidator_map);
-        self.watcher.ensure_watched_file(path, self.root_path())?;
-        Ok(old_invalidators)
     }
 
     /// registers the path as an invalidator for the current task,
@@ -357,10 +330,26 @@ impl DiskFileSystemInner {
     fn register_dir_invalidator(&self, path: &Path) -> Result<()> {
         if let Some(invalidator) = turbo_tasks::get_invalidator() {
             self.dir_invalidator_map
-                .insert(path.to_owned(), invalidator, None);
+                .insert(path.to_owned(), invalidator);
             self.watcher.ensure_watched_dir(path, self.root_path())?;
         }
         Ok(())
+    }
+
+    /// After an effect writes to a path, invalidate any read tasks tracking that path so they
+    /// re-read the updated content. This is necessary because the file watcher may not be active
+    /// (e.g., in tests or build-only scenarios).
+    fn invalidate_from_write(&self, full_path: &Path) {
+        let mut invalidator_map = self.invalidator_map.lock().unwrap();
+        if let Some(invalidators) = invalidator_map.remove(full_path) {
+            let Some(turbo_tasks) = self.turbo_tasks.upgrade() else {
+                return;
+            };
+            let _guard = self.tokio_handle.enter();
+            for (invalidator, _) in invalidators {
+                invalidator.invalidate(&*turbo_tasks);
+            }
+        }
     }
 
     async fn lock_path(&self, full_path: &Path) -> PathLockGuard<'_> {
@@ -487,35 +476,6 @@ impl DiskFileSystemInner {
         });
     }
 
-    fn invalidate_from_write(
-        &self,
-        full_path: &Path,
-        invalidators: Vec<(Invalidator, Option<WriteContent>)>,
-    ) {
-        if !invalidators.is_empty() {
-            let Some(turbo_tasks) = self.turbo_tasks.upgrade() else {
-                return;
-            };
-            let _guard = self.tokio_handle.enter();
-
-            if let Some(path) = format_absolute_fs_path(full_path, &self.name, self.root_path()) {
-                if invalidators.len() == 1 {
-                    let (invalidator, _) = invalidators.into_iter().next().unwrap();
-                    invalidator.invalidate_with_reason(&*turbo_tasks, Write { path });
-                } else {
-                    invalidators.into_iter().for_each(|(invalidator, _)| {
-                        invalidator
-                            .invalidate_with_reason(&*turbo_tasks, Write { path: path.clone() });
-                    });
-                }
-            } else {
-                invalidators.into_iter().for_each(|(invalidator, _)| {
-                    invalidator.invalidate(&*turbo_tasks);
-                });
-            }
-        }
-    }
-
     #[tracing::instrument(level = "info", name = "start filesystem watching", skip_all, fields(path = %self.root))]
     async fn start_watching_internal(
         self: &Arc<Self>,
@@ -537,21 +497,14 @@ impl DiskFileSystemInner {
     }
 
     async fn create_directory(self: &Arc<Self>, directory: &Path) -> Result<()> {
-        let already_created = ApplyEffectsContext::with_or_insert_with(
-            DiskFileSystemApplyContext::default,
-            |fs_context| fs_context.created_directories.contains(directory),
-        );
-        if !already_created {
-            retry_blocking(|| std::fs::create_dir_all(directory))
-                .instrument(tracing::info_span!("create directory", name = ?directory))
-                .concurrency_limited(&self.write_semaphore)
-                .await?;
-            ApplyEffectsContext::with(|fs_context: &mut DiskFileSystemApplyContext| {
-                fs_context
-                    .created_directories
-                    .insert(directory.to_path_buf())
-            });
+        if self.created_dirs.contains_key(directory) {
+            return Ok(());
         }
+        retry_blocking(|| std::fs::create_dir_all(directory))
+            .instrument(tracing::info_span!("create directory", name = ?directory))
+            .concurrency_limited(&self.write_semaphore)
+            .await?;
+        self.created_dirs.insert(directory.to_path_buf(), ());
         Ok(())
     }
 }
@@ -737,6 +690,8 @@ impl DiskFileSystem {
                 denied_paths,
                 turbo_tasks: turbo_tasks_weak(),
                 tokio_handle: Handle::current(),
+                effect_state_storage: EffectStateStorage::default(),
+                created_dirs: DashMap::default(),
             }),
         };
 
@@ -968,36 +923,33 @@ impl FileSystem for DiskFileSystem {
         let content = content.await?;
 
         let inner = self.inner.clone();
-        let invalidator = turbo_tasks::get_invalidator();
 
         #[derive(TraceRawVcs, NonLocalValue)]
         struct WriteEffect {
             full_path: PathBuf,
             inner: Arc<DiskFileSystemInner>,
-            invalidator: Option<Invalidator>,
             content: ReadRef<FileContent>,
         }
 
         impl Effect for WriteEffect {
-            type Error = AnyhowWrapper;
+            type Value = ReadRef<FileContent>;
 
-            async fn apply(&self) -> Result<(), Self::Error> {
+            fn key(&self) -> Vec<u8> {
+                self.full_path.as_os_str().as_encoded_bytes().to_vec()
+            }
+
+            fn value(&self) -> ReadRef<FileContent> {
+                self.content.clone()
+            }
+
+            fn state_storage(&self) -> &EffectStateStorage {
+                &self.inner.effect_state_storage
+            }
+
+            async fn apply(&self) -> Result<()> {
                 let full_path = validate_path_length(&self.full_path)?;
 
                 let _lock = self.inner.lock_path(&full_path).await;
-
-                // Track the file, so that we will rewrite it if it ever changes.
-                let old_invalidators = self
-                    .invalidator
-                    .map(|invalidator| {
-                        self.inner.register_write_invalidator(
-                            &full_path,
-                            invalidator,
-                            WriteContent::File(self.content.clone()),
-                        )
-                    })
-                    .transpose()?
-                    .unwrap_or_default();
 
                 // We perform an untracked comparison here, so that this write is not dependent
                 // on a read's Vc<FileContent> (and the memory it holds). Our untracked read can
@@ -1011,15 +963,6 @@ impl FileSystem for DiskFileSystem {
                     .concurrency_limited(&self.inner.read_semaphore)
                     .await?;
                 if compare == FileComparison::Equal {
-                    if !old_invalidators.is_empty() {
-                        for (invalidator, write_content) in old_invalidators {
-                            self.inner.invalidator_map.insert(
-                                full_path.clone().into_owned(),
-                                invalidator,
-                                write_content,
-                            );
-                        }
-                    }
                     return Ok(());
                 }
 
@@ -1089,8 +1032,8 @@ impl FileSystem for DiskFileSystem {
                     }
                 }
 
-                self.inner
-                    .invalidate_from_write(&full_path, old_invalidators);
+                // Invalidate any read tasks tracking this path so they re-read the new content
+                self.inner.invalidate_from_write(&self.full_path);
 
                 Ok(())
             }
@@ -1099,7 +1042,6 @@ impl FileSystem for DiskFileSystem {
         emit_effect(WriteEffect {
             full_path,
             inner,
-            invalidator,
             content,
         });
 
@@ -1121,35 +1063,33 @@ impl FileSystem for DiskFileSystem {
 
         let full_path = self.to_sys_path(&fs_path);
         let inner = self.inner.clone();
-        let invalidator = turbo_tasks::get_invalidator();
 
         #[derive(TraceRawVcs, NonLocalValue)]
         struct WriteLinkEffect {
             full_path: PathBuf,
             inner: Arc<DiskFileSystemInner>,
-            invalidator: Option<Invalidator>,
             content: ReadRef<LinkContent>,
         }
 
         impl Effect for WriteLinkEffect {
-            type Error = AnyhowWrapper;
+            type Value = ReadRef<LinkContent>;
 
-            async fn apply(&self) -> Result<(), Self::Error> {
+            fn key(&self) -> Vec<u8> {
+                self.full_path.as_os_str().as_encoded_bytes().to_vec()
+            }
+
+            fn value(&self) -> ReadRef<LinkContent> {
+                self.content.clone()
+            }
+
+            fn state_storage(&self) -> &EffectStateStorage {
+                &self.inner.effect_state_storage
+            }
+
+            async fn apply(&self) -> Result<()> {
                 let full_path = validate_path_length(&self.full_path)?;
 
                 let _lock = self.inner.lock_path(&full_path).await;
-
-                let old_invalidators = self
-                    .invalidator
-                    .map(|invalidator| {
-                        self.inner.register_write_invalidator(
-                            &full_path,
-                            invalidator,
-                            WriteContent::Link(self.content.clone()),
-                        )
-                    })
-                    .transpose()?
-                    .unwrap_or_default();
 
                 enum OsSpecificLinkContent {
                     Link {
@@ -1205,15 +1145,6 @@ impl FileSystem for DiskFileSystem {
                     _ => false,
                 };
                 if is_equal {
-                    if !old_invalidators.is_empty() {
-                        for (invalidator, write_content) in old_invalidators {
-                            self.inner.invalidator_map.insert(
-                                full_path.clone().into_owned(),
-                                invalidator,
-                                write_content,
-                            );
-                        }
-                    }
                     return Ok(());
                 }
 
@@ -1315,9 +1246,7 @@ impl FileSystem for DiskFileSystem {
                             .with_context(err_context)?;
                     }
                     OsSpecificLinkContent::Invalid => {
-                        return Err(AnyhowWrapper(anyhow!(
-                            "invalid symlink target: {full_path:?}"
-                        )));
+                        return Err(anyhow!("invalid symlink target: {full_path:?}"));
                     }
                     OsSpecificLinkContent::NotFound => {
                         retry_blocking(|| remove_symbolic_link_dir_helper(&full_path))
@@ -1328,6 +1257,9 @@ impl FileSystem for DiskFileSystem {
                     }
                 }
 
+                // Invalidate any read tasks tracking this path so they re-read the new content
+                self.inner.invalidate_from_write(&self.full_path);
+
                 Ok(())
             }
         }
@@ -1335,7 +1267,6 @@ impl FileSystem for DiskFileSystem {
         emit_effect(WriteLinkEffect {
             full_path,
             inner,
-            invalidator,
             content,
         });
         Ok(())
@@ -2863,35 +2794,6 @@ async fn realpath_with_links(path: FileSystemPath) -> Result<Vc<RealPathResult>>
     .cell())
 }
 
-/// Wrapper to convert `anyhow::Error` to `impl std::error::Error` for use in `Effect::apply`.
-// TODO(bgw): use a structured error type instead of anyhow for write/write_link
-#[derive(TraceRawVcs, NonLocalValue)]
-struct AnyhowWrapper(anyhow::Error);
-
-impl std::fmt::Display for AnyhowWrapper {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.0, f)
-    }
-}
-
-impl std::fmt::Debug for AnyhowWrapper {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&self.0, f)
-    }
-}
-
-impl StdError for AnyhowWrapper {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        self.0.source()
-    }
-}
-
-impl From<anyhow::Error> for AnyhowWrapper {
-    fn from(err: anyhow::Error) -> Self {
-        AnyhowWrapper(err)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use turbo_rcstr::rcstr;
@@ -3292,13 +3194,13 @@ mod tests {
 
                 let mut rng = rand::rngs::SmallRng::seed_from_u64(0);
                 for _ in 0..STRESS_ITERATIONS {
-                    let updates: Vec<(usize, usize)> = (0..STRESS_PARALLELISM)
-                        .map(|_| {
-                            let symlink_idx = rng.random_range(0..STRESS_SYMLINK_COUNT);
-                            let target_idx = rng.random_range(0..STRESS_TARGET_COUNT);
-                            (symlink_idx, target_idx)
-                        })
-                        .collect();
+                    let mut updates_map = rustc_hash::FxHashMap::default();
+                    for _ in 0..STRESS_PARALLELISM {
+                        let symlink_idx = rng.random_range(0..STRESS_SYMLINK_COUNT);
+                        let target_idx = rng.random_range(0..STRESS_TARGET_COUNT);
+                        updates_map.insert(symlink_idx, target_idx);
+                    }
+                    let updates: Vec<(usize, usize)> = updates_map.into_iter().collect();
 
                     apply_effects_operation(write_symlink_stress_batch(
                         fs,
