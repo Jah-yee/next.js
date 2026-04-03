@@ -2,16 +2,16 @@
     "output/0rv8_turbopack-tests_tests_snapshot_swc_transforms_preset_env_input_index_04jskxh.js",
     {"otherChunks":["output/turbopack_crates_turbopack-tests_tests_snapshot_1v9rcb0._.js"],"runtimeModuleIds":["[project]/turbopack/crates/turbopack-tests/tests/snapshot/swc_transforms/preset_env/input/index.js [test] (ecmascript)"]}
 ]);
-(() => {
+(function(){
 if (!Array.isArray(globalThis["TURBOPACK"])) {
     return;
 }
 
-const CHUNK_BASE_PATH = "";
-const RELATIVE_ROOT_PATH = "../../../../../../..";
-const RUNTIME_PUBLIC_PATH = "";
-const ASSET_SUFFIX = "";
-const WORKER_FORWARDED_GLOBALS = [];
+var CHUNK_BASE_PATH = "";
+var RELATIVE_ROOT_PATH = "../../../../../../..";
+var RUNTIME_PUBLIC_PATH = "";
+var ASSET_SUFFIX = "";
+var WORKER_FORWARDED_GLOBALS = [];
 /**
  * This file contains runtime types and functions that are shared between all
  * TurboPack ECMAScript runtimes.
@@ -1623,10 +1623,13 @@ function _ts_generator(thisArg, body) {
  */ /* eslint-disable @typescript-eslint/no-unused-vars */ /// <reference path="../../../browser/runtime/base/runtime-base.ts" />
 /// <reference path="../../../shared/runtime/runtime-types.d.ts" />
 function getAssetSuffixFromScriptSrc() {
-    var _self_TURBOPACK_ASSET_SUFFIX;
-    var _document_currentScript_getAttribute, _document_currentScript_getAttribute1, _document_currentScript, _document;
+    var _ref;
+    var _document_currentScript_getAttribute, _document_currentScript, _document;
     // TURBOPACK_ASSET_SUFFIX is set in web workers
-    return ((_self_TURBOPACK_ASSET_SUFFIX = self.TURBOPACK_ASSET_SUFFIX) !== null && _self_TURBOPACK_ASSET_SUFFIX !== void 0 ? _self_TURBOPACK_ASSET_SUFFIX : (_document = document) === null || _document === void 0 ? void 0 : (_document_currentScript = _document.currentScript) === null || _document_currentScript === void 0 ? void 0 : (_document_currentScript_getAttribute1 = _document_currentScript.getAttribute) === null || _document_currentScript_getAttribute1 === void 0 ? void 0 : (_document_currentScript_getAttribute = _document_currentScript_getAttribute1.call(_document_currentScript, 'src')) === null || _document_currentScript_getAttribute === void 0 ? void 0 : _document_currentScript_getAttribute.replace(/^(.*(?=\?)|^.*$)/, '')) || '';
+    if (self.TURBOPACK_ASSET_SUFFIX != null) return self.TURBOPACK_ASSET_SUFFIX;
+    var src = (_ref = (_document = document) === null || _document === void 0 ? void 0 : (_document_currentScript = _document.currentScript) === null || _document_currentScript === void 0 ? void 0 : (_document_currentScript_getAttribute = _document_currentScript.getAttribute) === null || _document_currentScript_getAttribute === void 0 ? void 0 : _document_currentScript_getAttribute.call(_document_currentScript, 'src')) !== null && _ref !== void 0 ? _ref : '';
+    var qi = src.indexOf('?');
+    return qi >= 0 ? src.slice(qi) : '';
 }
 var BACKEND;
 /**
@@ -1887,7 +1890,7 @@ var BACKEND;
         return fetch(getChunkRelativeUrl(wasmChunkPath));
     }
 })();
-const chunksToRegister = globalThis["TURBOPACK"];
+var chunksToRegister = globalThis["TURBOPACK"];
 globalThis["TURBOPACK"] = { push: registerChunk };
 chunksToRegister.forEach(registerChunk);
 })();
