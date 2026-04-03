@@ -1,5 +1,5 @@
 use anyhow::{Ok, Result, bail};
-use futures::try_join;
+use futures::join;
 use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{
     FxIndexMap, ResolvedVc, TryFlatJoinIterExt, TryJoinIterExt, ValueToStringRef, Vc,
@@ -105,7 +105,9 @@ pub async fn emit_assets(
         Ok(first)
     }
 
-    try_join!(
+    // Use join! instead of try_join! to collect all errors deterministically
+    // rather than returning whichever branch fails first non-deterministically.
+    let (node_result, client_result) = join!(
         node_assets_by_path
             .into_iter()
             .map(async |(path, assets)| {
@@ -129,7 +131,9 @@ pub async fn emit_assets(
                 .await
             })
             .try_join(),
-    )?;
+    );
+    node_result?;
+    client_result?;
     Ok(())
 }
 
