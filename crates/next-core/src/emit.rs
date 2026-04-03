@@ -1,5 +1,6 @@
 use anyhow::{Ok, Result};
 use futures::join;
+use smallvec::{SmallVec, smallvec};
 use turbo_rcstr::RcStr;
 use turbo_tasks::{
     FxIndexMap, ResolvedVc, TryFlatJoinIterExt, TryJoinIterExt, ValueToStringRef, Vc,
@@ -70,20 +71,21 @@ pub async fn emit_assets(
         .try_flat_join()
         .await?;
 
-    let mut node_assets_by_path = FxIndexMap::default();
-    let mut client_assets_by_path = FxIndexMap::default();
+    type AssetVec = SmallVec<[ResolvedVc<Box<dyn OutputAsset>>; 1]>;
+    let mut node_assets_by_path: FxIndexMap<FileSystemPath, AssetVec> = FxIndexMap::default();
+    let mut client_assets_by_path: FxIndexMap<FileSystemPath, AssetVec> = FxIndexMap::default();
     for (location, path, asset) in assets {
         match location {
             Location::Node => {
                 node_assets_by_path
                     .entry(path)
-                    .or_insert_with(Vec::new)
+                    .or_insert_with(|| smallvec![])
                     .push(asset);
             }
             Location::Client => {
                 client_assets_by_path
                     .entry(path)
-                    .or_insert_with(Vec::new)
+                    .or_insert_with(|| smallvec![])
                     .push(asset);
             }
         }
@@ -94,7 +96,7 @@ pub async fn emit_assets(
     /// conflict but still returns the first asset so emission can continue.
     async fn check_duplicates(
         path: &FileSystemPath,
-        assets: Vec<ResolvedVc<Box<dyn OutputAsset>>>,
+        assets: AssetVec,
         node_root: &FileSystemPath,
     ) -> Result<ResolvedVc<Box<dyn OutputAsset>>> {
         let mut iter = assets.into_iter();
