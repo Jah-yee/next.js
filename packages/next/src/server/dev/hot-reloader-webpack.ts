@@ -111,6 +111,7 @@ import {
   matchNextPageBundleRequest,
 } from './hot-reloader-shared-utils'
 import { getMcpMiddleware } from '../mcp/get-mcp-middleware'
+import { emitHmrBuilding, emitHmrBuilt } from './hmr-cycle-emitter'
 import { setStackFrameResolver } from '../mcp/tools/utils/format-errors'
 import { recordMcpTelemetry } from '../mcp/mcp-telemetry-tracker'
 import { getFileLogger } from './browser-logs/file-logger'
@@ -1555,6 +1556,39 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
         this.refreshServerComponents(stats.hash)
       }
 
+      // Emit HMR cycle result for MCP dev_cycle tool.
+      // This fires after ALL compilers (client, server, edge) are done,
+      // so the page is safe to fetch after this point.
+      const allStats = stats.stats.flatMap((s) => {
+        const json = s.toJson({
+          all: false,
+          hash: true,
+          errors: true,
+          warnings: true,
+        })
+        return json
+      })
+      const errors = allStats.flatMap((s) =>
+        (s.errors || []).map((e: any) => ({
+          message: typeof e === 'string' ? e : e.message,
+          details: typeof e === 'string' ? undefined : e.details,
+          moduleName: typeof e === 'string' ? undefined : e.moduleName,
+        }))
+      )
+      const warnings = allStats.flatMap((s) =>
+        (s.warnings || []).map((w: any) => ({
+          message: typeof w === 'string' ? w : w.message,
+          details: typeof w === 'string' ? undefined : w.details,
+          moduleName: typeof w === 'string' ? undefined : w.moduleName,
+        }))
+      )
+      emitHmrBuilt({
+        hash: stats.hash,
+        errors,
+        warnings,
+        updatedModules: [],
+      })
+
       changedClientPages.clear()
       changedServerPages.clear()
       changedEdgeServerPages.clear()
@@ -1619,6 +1653,13 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
       this.devtoolsFrontendUrl,
       this.config,
       initialDevToolsConfig
+    )
+
+    // Emit HMR building signal when any compiler starts.
+    // This pairs with emitHmrBuilt in the multiCompiler.hooks.done above.
+    this.multiCompiler.compilers[0].hooks.invalid.tap(
+      'NextjsHmrCycleEmitter',
+      () => emitHmrBuilding()
     )
 
     let booted = false
