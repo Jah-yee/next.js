@@ -299,6 +299,10 @@ impl Effects {
                         }
                     }
 
+                    // Clear stored value so concurrent fast-path checks won't
+                    // match against the stale value while we're writing.
+                    *entry.last_applied.lock() = None;
+
                     // Apply the effect
                     effect.dyn_apply().await?;
 
