@@ -1,6 +1,6 @@
-use anyhow::{Ok, Result, bail};
+use anyhow::{Ok, Result};
 use futures::join;
-use turbo_rcstr::RcStr;
+use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{
     FxIndexMap, ResolvedVc, TryFlatJoinIterExt, TryJoinIterExt, ValueToStringRef, Vc,
 };
@@ -8,6 +8,7 @@ use turbo_tasks_fs::{FileContent, FileSystemPath, rebase};
 use turbo_tasks_hash::{encode_hex, hash_xxh3_hash64};
 use turbopack_core::{
     asset::{Asset, AssetContent},
+    issue::{Issue, IssueExt, IssueSeverity, IssueStage, OptionStyledString, StyledString},
     output::{ExpandedOutputAssets, OutputAsset, OutputAssets},
     reference::all_assets_from_entries,
 };
@@ -88,6 +89,9 @@ pub async fn emit_assets(
         }
     }
 
+    /// Checks for duplicate assets at the same path. If duplicates with
+    /// different content are found, emits an `EmitConflictIssue` for each
+    /// conflict but still returns the first asset so emission can continue.
     async fn check_duplicates(
         path: &FileSystemPath,
         assets: Vec<ResolvedVc<Box<dyn OutputAsset>>>,
@@ -97,16 +101,9 @@ pub async fn emit_assets(
         let first = iter.next().unwrap();
         for next in iter {
             let ext: RcStr = path.extension().into();
-            if let Some(diff) = assets_diff(*next, *first, ext, node_root.clone())
-                .owned()
-                .await?
-            {
-                bail!(
-                    "Duplicate asset with different content: {}\n{}",
-                    path.to_string_ref().await?,
-                    diff
-                );
-            }
+            check_emit_conflict(*next, *first, ext, path.clone(), node_root.clone())
+                .as_side_effect()
+                .await?;
         }
         Ok(first)
     }
@@ -174,26 +171,30 @@ async fn emit_rebase(
     Ok(())
 }
 
+/// Compares two assets that target the same output path. If their content
+/// differs, writes both versions under `node_root` as `<hash>.<ext>` and
+/// emits an `EmitConflictIssue` so the user can diff them.
 #[turbo_tasks::function]
-async fn assets_diff(
-    assets1: Vc<Box<dyn OutputAsset>>,
-    assets2: Vc<Box<dyn OutputAsset>>,
+async fn check_emit_conflict(
+    asset1: Vc<Box<dyn OutputAsset>>,
+    asset2: Vc<Box<dyn OutputAsset>>,
     extension: RcStr,
+    asset_path: FileSystemPath,
     node_root: FileSystemPath,
-) -> Result<Vc<Option<RcStr>>> {
-    let content1 = assets1.content().await?;
-    let content2 = assets2.content().await?;
+) -> Result<()> {
+    let content1 = asset1.content().await?;
+    let content2 = asset2.content().await?;
 
-    match (&*content1, &*content2) {
+    let detail = match (&*content1, &*content2) {
         (AssetContent::File(content1), AssetContent::File(content2)) => {
             let content1 = content1.await?;
             let content2 = content2.await?;
 
             match (&*content1, &*content2) {
-                (FileContent::NotFound, FileContent::NotFound) => Ok(Vc::cell(None)),
+                (FileContent::NotFound, FileContent::NotFound) => None,
                 (FileContent::Content(file1), FileContent::Content(file2)) => {
                     if file1 == file2 {
-                        Ok(Vc::cell(None))
+                        None
                     } else {
                         // Write both versions under node_root as <hash>.<ext> so the
                         // user can diff them.
@@ -220,17 +221,14 @@ async fn assets_diff(
                             .write(FileContent::Content(file2.clone()).cell())
                             .as_side_effect()
                             .await?;
-                        Ok(Vc::cell(Some(
-                            format!(
-                                "file content differs, written to:\n  {}\n  {}",
-                                path1.to_string_ref().await?,
-                                path2.to_string_ref().await?,
-                            )
-                            .into(),
-                        )))
+                        Some(format!(
+                            "file content differs, written to:\n  {}\n  {}",
+                            path1.to_string_ref().await?,
+                            path2.to_string_ref().await?,
+                        ))
                     }
                 }
-                _ => Ok(Vc::cell(Some("file content type differs".into()))),
+                _ => Some("file content type differs".into()),
             }
         }
         (
@@ -244,13 +242,61 @@ async fn assets_diff(
             },
         ) => {
             if target1 == target2 && link_type1 == link_type2 {
-                Ok(Vc::cell(None))
+                None
             } else {
-                Ok(Vc::cell(Some(
-                    format!("redirect differs: {} vs {}", target1, target2).into(),
-                )))
+                Some(format!("redirect differs: {} vs {}", target1, target2))
             }
         }
-        _ => Ok(Vc::cell(Some("asset content type differs".into()))),
+        _ => Some("asset content type differs".into()),
+    };
+
+    if let Some(detail) = detail {
+        EmitConflictIssue {
+            asset_path,
+            detail: detail.into(),
+        }
+        .resolved_cell()
+        .emit();
+    }
+
+    Ok(())
+}
+
+#[turbo_tasks::value]
+struct EmitConflictIssue {
+    asset_path: FileSystemPath,
+    detail: RcStr,
+}
+
+#[turbo_tasks::value_impl]
+impl Issue for EmitConflictIssue {
+    #[turbo_tasks::function]
+    fn file_path(&self) -> Vc<FileSystemPath> {
+        self.asset_path.clone().cell()
+    }
+
+    #[turbo_tasks::function]
+    fn stage(&self) -> Vc<IssueStage> {
+        IssueStage::Other(rcstr!("emit")).cell()
+    }
+
+    fn severity(&self) -> IssueSeverity {
+        IssueSeverity::Error
+    }
+
+    #[turbo_tasks::function]
+    async fn title(&self) -> Result<Vc<StyledString>> {
+        Ok(StyledString::Line(vec![
+            StyledString::Text("Duplicate asset with different content: ".into()),
+            StyledString::Code(self.asset_path.to_string().into()),
+        ])
+        .cell())
+    }
+
+    #[turbo_tasks::function]
+    fn description(&self) -> Vc<OptionStyledString> {
+        Vc::cell(Some(
+            StyledString::Text(self.detail.clone()).resolved_cell(),
+        ))
     }
 }
