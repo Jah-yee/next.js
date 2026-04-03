@@ -96,7 +96,8 @@ pub async fn emit_assets(
         let mut iter = assets.into_iter();
         let first = iter.next().unwrap();
         for next in iter {
-            if let Some(diff) = assets_diff(*next, *first, path.clone(), node_root.clone())
+            let ext: RcStr = path.extension().into();
+            if let Some(diff) = assets_diff(*next, *first, ext, node_root.clone())
                 .owned()
                 .await?
             {
@@ -177,7 +178,7 @@ async fn emit_rebase(
 async fn assets_diff(
     assets1: Vc<Box<dyn OutputAsset>>,
     assets2: Vc<Box<dyn OutputAsset>>,
-    asset_path: FileSystemPath,
+    extension: RcStr,
     node_root: FileSystemPath,
 ) -> Result<Vc<Option<RcStr>>> {
     let content1 = assets1.content().await?;
@@ -196,7 +197,7 @@ async fn assets_diff(
                     } else {
                         // Write both versions under node_root as <hash>.<ext> so the
                         // user can diff them.
-                        let ext = asset_path.extension();
+                        let ext = &*extension;
                         let hash1 = encode_hex(hash_xxh3_hash64(file1.content().content_hash()));
                         let hash2 = encode_hex(hash_xxh3_hash64(file2.content().content_hash()));
                         let name1 = if ext.is_empty() {
