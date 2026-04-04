@@ -45,10 +45,13 @@ export class ReactServerResult {
     if (process.env.TURBOPACK) {
       Readable = (require('node:stream') as typeof import('node:stream'))
         .Readable
-    } else {
+    } else if (process.env.__NEXT_BUNDLER === 'Webpack') {
       Readable = (
         __non_webpack_require__('node:stream') as typeof import('node:stream')
       ).Readable
+    } else {
+      Readable = (require('node:stream') as typeof import('node:stream'))
+        .Readable
     }
     const webStream = Readable.toWeb(this._stream) as ReadableStream<Uint8Array>
     const tee = webStream.tee()
@@ -150,10 +153,13 @@ export class ReplayableNodeStream {
     if (process.env.TURBOPACK) {
       ReadableCtor = (require('node:stream') as typeof import('node:stream'))
         .Readable
-    } else {
+    } else if (process.env.__NEXT_BUNDLER === 'Webpack') {
       ReadableCtor = (
         __non_webpack_require__('node:stream') as typeof import('node:stream')
       ).Readable
+    } else {
+      ReadableCtor = (require('node:stream') as typeof import('node:stream'))
+        .Readable
     }
 
     const bufferedChunks = this._chunks.slice()
