@@ -2,7 +2,7 @@ use std::{cmp::Ordering, fs::File, hash::BuildHasherDefault, path::Path, rc::Rc,
 
 use anyhow::{Context, Result, bail, ensure};
 use memmap2::Mmap;
-use quick_cache::sync::GuardResult;
+use quick_cache::{Lifecycle, sync::GuardResult};
 use rustc_hash::FxHasher;
 use smallvec::SmallVec;
 
@@ -87,8 +87,37 @@ impl quick_cache::Weighter<(u32, u16), ArcBytes> for BlockWeighter {
     }
 }
 
-pub type BlockCache =
-    quick_cache::sync::Cache<(u32, u16), ArcBytes, BlockWeighter, BuildHasherDefault<FxHasher>>;
+/// Lifecycle hooks for the block cache that prevent eviction of entries
+/// still referenced outside the cache (i.e., with `Arc` strong count > 1).
+#[derive(Clone, Default)]
+pub struct BlockCacheLifecycle;
+
+impl Lifecycle<(u32, u16), ArcBytes> for BlockCacheLifecycle {
+    type RequestState = Option<((u32, u16), ArcBytes)>;
+
+    #[inline]
+    fn is_pinned(&self, _key: &(u32, u16), val: &ArcBytes) -> bool {
+        val.is_shared()
+    }
+
+    #[inline]
+    fn begin_request(&self) -> Self::RequestState {
+        None
+    }
+
+    #[inline]
+    fn on_evict(&self, state: &mut Self::RequestState, key: (u32, u16), val: ArcBytes) {
+        *state = Some((key, val));
+    }
+}
+
+pub type BlockCache = quick_cache::sync::Cache<
+    (u32, u16),
+    ArcBytes,
+    BlockWeighter,
+    BuildHasherDefault<FxHasher>,
+    BlockCacheLifecycle,
+>;
 
 /// Trait abstracting value block reading for `handle_key_match_generic`.
 ///
