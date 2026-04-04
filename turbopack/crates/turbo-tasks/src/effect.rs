@@ -1,4 +1,12 @@
-use std::{any::Any, future::Future, pin::Pin, sync::Arc};
+use std::{
+    any::Any,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use anyhow::{Result, bail};
 use auto_hash_map::AutoSet;
@@ -191,7 +199,10 @@ pub async fn get_effects(source: impl CollectiblesSource) -> Result<Effects> {
         })
         .try_join()
         .await?;
-    Ok(Effects { effects })
+    Ok(Effects {
+        effects,
+        all_applied: AtomicBool::new(false),
+    })
 }
 
 /// Captured effects from an operation. This struct can be used to return Effects from a turbo-tasks
@@ -201,6 +212,15 @@ pub async fn get_effects(source: impl CollectiblesSource) -> Result<Effects> {
 pub struct Effects {
     #[turbo_tasks(debug_ignore)]
     effects: Vec<ReadRef<EffectInstance>>,
+    /// Set to `true` after `apply()` completes with all effects already in their applied state
+    /// (no writes needed). On subsequent calls, this allows an O(1) early return without
+    /// iterating effects or allocating any HashMaps.
+    ///
+    /// Safety: once set to `true`, it remains valid as long as no external writer clears
+    /// `last_applied` for any key owned by this Effects set. In practice effects for a given
+    /// endpoint write to a disjoint set of paths, so this is always safe.
+    #[turbo_tasks(debug_ignore, trace_ignore)]
+    all_applied: AtomicBool,
 }
 
 impl PartialEq for Effects {
@@ -233,6 +253,14 @@ impl Effects {
         if self.effects.is_empty() {
             return Ok(());
         }
+
+        // Ultra-fast path: if all effects were already applied on the last call (no writes
+        // needed), skip all allocation and iteration. This is the common case when
+        // `writeToDisk()` is called repeatedly for an unchanged endpoint.
+        if self.all_applied.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
         let span = tracing::info_span!("apply effects", count = self.effects.len());
 
         async {
@@ -263,9 +291,11 @@ impl Effects {
                 unique_effects.push(effects[0]);
             }
 
-            // Step 3: Apply effects in parallel
+            // Step 3: Apply effects in parallel, tracking whether any write was needed.
+            // Use an AtomicBool so the flag is shareable across concurrent async closures.
+            let all_fast_pathed = AtomicBool::new(true);
             futures::stream::iter(unique_effects)
-                .map(Ok)
+                .map(Ok::<_, anyhow::Error>)
                 .try_for_each_concurrent(APPLY_EFFECTS_CONCURRENCY_LIMIT, async |effect| {
                     let key = effect.key();
                     let state_storage = effect.state_storage();
@@ -286,6 +316,9 @@ impl Effects {
                             return Ok(());
                         }
                     }
+
+                    // A write is needed — record that not all effects were fast-pathed
+                    all_fast_pathed.store(false, Ordering::Relaxed);
 
                     // Slow path: acquire the write lock and re-check before writing
                     let _write_guard = entry.write_lock.lock().await;
@@ -311,7 +344,15 @@ impl Effects {
 
                     Ok(())
                 })
-                .await
+                .await?;
+
+            // If every effect hit the fast path, future apply() calls can return immediately
+            // without any allocation or iteration.
+            if all_fast_pathed.load(Ordering::Relaxed) {
+                self.all_applied.store(true, Ordering::Release);
+            }
+
+            Ok::<(), anyhow::Error>(())
         }
         .instrument(span)
         .await
