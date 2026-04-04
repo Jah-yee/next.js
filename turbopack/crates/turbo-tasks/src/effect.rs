@@ -202,6 +202,10 @@ pub async fn get_effects(source: impl CollectiblesSource) -> Result<Effects> {
     })
 }
 
+/// Cached result of grouping effects by key and dedup/conflict detection.
+/// Each entry is (index into `effects`, cached key bytes).
+type UniqueEffectIndices = Result<Vec<(usize, Vec<u8>)>, String>;
+
 /// Captured effects from an operation. This struct can be used to return Effects from a turbo-tasks
 /// function and apply them later.
 #[derive(Default)]
@@ -209,11 +213,11 @@ pub async fn get_effects(source: impl CollectiblesSource) -> Result<Effects> {
 pub struct Effects {
     #[turbo_tasks(debug_ignore)]
     effects: Vec<ReadRef<EffectInstance>>,
-    /// Cached indices into `effects` after grouping by key and dedup/conflict detection.
+    /// Cached (index, key) pairs after grouping by key and dedup/conflict detection.
     /// Computed once on first `apply()` call; reused on subsequent calls to avoid repeated
-    /// HashMap allocation. `Err` means a conflict was detected.
+    /// HashMap allocation and key() Vec<u8> allocations. `Err` means a conflict was detected.
     #[turbo_tasks(debug_ignore, trace_ignore)]
-    unique_indices: OnceLock<Result<Vec<usize>, String>>,
+    unique_indices: OnceLock<UniqueEffectIndices>,
 }
 
 impl PartialEq for Effects {
@@ -248,7 +252,7 @@ impl Effects {
         let span = tracing::info_span!("apply effects", count = self.effects.len());
 
         async {
-            // Compute unique indices once (grouping + conflict detection), reuse on later calls.
+            // Compute unique (index, key) pairs once; reuse on later calls.
             let unique_indices = self.unique_indices.get_or_init(|| {
                 let mut by_key: rustc_hash::FxHashMap<Vec<u8>, Vec<usize>> =
                     rustc_hash::FxHashMap::default();
@@ -258,7 +262,7 @@ impl Effects {
                 }
 
                 let mut indices = Vec::with_capacity(by_key.len());
-                for (key, group) in &by_key {
+                for (key, group) in by_key {
                     if group.len() > 1 {
                         let first_value = self.effects[group[0]].inner.value_dyn();
                         for &idx in &group[1..] {
@@ -270,7 +274,7 @@ impl Effects {
                             }
                         }
                     }
-                    indices.push(group[0]);
+                    indices.push((group[0], key));
                 }
                 Ok(indices)
             });
@@ -279,55 +283,61 @@ impl Effects {
                 Err(msg) => bail!("{msg}"),
             };
 
-            // Apply effects using cached indices — per-key state check runs every time.
+            // Apply effects using cached (index, key) pairs.
             futures::stream::iter(unique_indices.iter())
                 .map(Ok::<_, anyhow::Error>)
-                .try_for_each_concurrent(APPLY_EFFECTS_CONCURRENCY_LIMIT, async |&idx| {
-                    let effect: &dyn DynEffect = &*self.effects[idx].inner;
-                    let key = effect.key();
-                    let state_storage = effect.state_storage();
+                .try_for_each_concurrent(
+                    APPLY_EFFECTS_CONCURRENCY_LIMIT,
+                    async |&(idx, ref key)| {
+                        let effect: &dyn DynEffect = &*self.effects[idx].inner;
+                        let state_storage = effect.state_storage();
 
-                    // Get or insert per-key entry
-                    let entry = state_storage
-                        .effect_state
-                        .entry(key)
-                        .or_insert_with(|| Arc::new(EffectStateEntry::default()))
-                        .clone();
+                        // Get per-key entry, avoiding key clone when already present
+                        let entry = if let Some(existing) = state_storage.effect_state.get(key) {
+                            existing.clone()
+                        } else {
+                            state_storage
+                                .effect_state
+                                .entry(key.clone())
+                                .or_insert_with(|| Arc::new(EffectStateEntry::default()))
+                                .clone()
+                        };
 
-                    // Fast path: check if the stored value already matches (sync, no await)
-                    {
-                        let stored = entry.last_applied.lock();
-                        if let Some(stored_val) = stored.as_ref()
-                            && effect.eq_value_dyn(&**stored_val)
+                        // Fast path: check if the stored value already matches (sync, no await)
                         {
-                            return Ok(());
+                            let stored = entry.last_applied.lock();
+                            if let Some(stored_val) = stored.as_ref()
+                                && effect.eq_value_dyn(&**stored_val)
+                            {
+                                return Ok(());
+                            }
                         }
-                    }
 
-                    // Slow path: acquire the write lock and re-check before writing
-                    let _write_guard = entry.write_lock.lock().await;
+                        // Slow path: acquire the write lock and re-check before writing
+                        let _write_guard = entry.write_lock.lock().await;
 
-                    {
-                        let stored = entry.last_applied.lock();
-                        if let Some(stored_val) = stored.as_ref()
-                            && effect.eq_value_dyn(&**stored_val)
                         {
-                            return Ok(());
+                            let stored = entry.last_applied.lock();
+                            if let Some(stored_val) = stored.as_ref()
+                                && effect.eq_value_dyn(&**stored_val)
+                            {
+                                return Ok(());
+                            }
                         }
-                    }
 
-                    // Clear stored value so concurrent fast-path checks won't
-                    // match against the stale value while we're writing.
-                    *entry.last_applied.lock() = None;
+                        // Clear stored value so concurrent fast-path checks won't
+                        // match against the stale value while we're writing.
+                        *entry.last_applied.lock() = None;
 
-                    // Apply the effect
-                    effect.dyn_apply().await?;
+                        // Apply the effect
+                        effect.dyn_apply().await?;
 
-                    // Store the new value (sync)
-                    *entry.last_applied.lock() = Some(effect.value_dyn());
+                        // Store the new value (sync)
+                        *entry.last_applied.lock() = Some(effect.value_dyn());
 
-                    Ok(())
-                })
+                        Ok(())
+                    },
+                )
                 .await?;
 
             Ok::<(), anyhow::Error>(())
