@@ -2,10 +2,7 @@ use std::{
     any::Any,
     future::Future,
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, OnceLock},
 };
 
 use anyhow::{Result, bail};
@@ -201,7 +198,7 @@ pub async fn get_effects(source: impl CollectiblesSource) -> Result<Effects> {
         .await?;
     Ok(Effects {
         effects,
-        all_applied: AtomicBool::new(false),
+        unique_indices: OnceLock::new(),
     })
 }
 
@@ -212,15 +209,11 @@ pub async fn get_effects(source: impl CollectiblesSource) -> Result<Effects> {
 pub struct Effects {
     #[turbo_tasks(debug_ignore)]
     effects: Vec<ReadRef<EffectInstance>>,
-    /// Set to `true` after `apply()` completes with all effects already in their applied state
-    /// (no writes needed). On subsequent calls, this allows an O(1) early return without
-    /// iterating effects or allocating any HashMaps.
-    ///
-    /// Safety: once set to `true`, it remains valid as long as no external writer clears
-    /// `last_applied` for any key owned by this Effects set. In practice effects for a given
-    /// endpoint write to a disjoint set of paths, so this is always safe.
+    /// Cached indices into `effects` after grouping by key and dedup/conflict detection.
+    /// Computed once on first `apply()` call; reused on subsequent calls to avoid repeated
+    /// HashMap allocation. `Err` means a conflict was detected.
     #[turbo_tasks(debug_ignore, trace_ignore)]
-    all_applied: AtomicBool,
+    unique_indices: OnceLock<Result<Vec<usize>, String>>,
 }
 
 impl PartialEq for Effects {
@@ -245,62 +238,56 @@ impl Eq for Effects {}
 impl Effects {
     /// Applies all effects that have been captured.
     ///
-    /// This performs:
-    /// 1. Grouping by key and conflict/duplicate detection
-    /// 2. Comparison against previously applied state (skip if unchanged)
-    /// 3. Parallel application of remaining effects
+    /// On first call: groups effects by key, detects duplicates/conflicts, caches deduped indices.
+    /// On subsequent calls: skips grouping (reuses cached indices), only runs per-key state checks.
     pub async fn apply(&self) -> Result<()> {
         if self.effects.is_empty() {
-            return Ok(());
-        }
-
-        // Ultra-fast path: if all effects were already applied on the last call (no writes
-        // needed), skip all allocation and iteration. This is the common case when
-        // `writeToDisk()` is called repeatedly for an unchanged endpoint.
-        if self.all_applied.load(Ordering::Acquire) {
             return Ok(());
         }
 
         let span = tracing::info_span!("apply effects", count = self.effects.len());
 
         async {
-            // Step 1: Group effects by key and detect duplicates/conflicts
-            let mut by_key: rustc_hash::FxHashMap<Vec<u8>, Vec<&dyn DynEffect>> =
-                rustc_hash::FxHashMap::default();
-            for effect in &self.effects {
-                let key = effect.inner.key();
-                by_key.entry(key).or_default().push(&*effect.inner);
-            }
+            // Compute unique indices once (grouping + conflict detection), reuse on later calls.
+            let unique_indices = self.unique_indices.get_or_init(|| {
+                let mut by_key: rustc_hash::FxHashMap<Vec<u8>, Vec<usize>> =
+                    rustc_hash::FxHashMap::default();
+                for (i, effect) in self.effects.iter().enumerate() {
+                    let key = effect.inner.key();
+                    by_key.entry(key).or_default().push(i);
+                }
 
-            // Step 2: Deduplicate and detect conflicts
-            let mut unique_effects: Vec<&dyn DynEffect> = Vec::with_capacity(by_key.len());
-            for (key, effects) in &by_key {
-                if effects.len() > 1 {
-                    // Check all effects in this group are equal
-                    let first_value = effects[0].value_dyn();
-                    for other in &effects[1..] {
-                        if !other.eq_value_dyn(&*first_value) {
-                            bail!(
-                                "Conflicting effects for the same key (key length: {} bytes)",
-                                key.len()
-                            );
+                let mut indices = Vec::with_capacity(by_key.len());
+                for (key, group) in &by_key {
+                    if group.len() > 1 {
+                        let first_value = self.effects[group[0]].inner.value_dyn();
+                        for &idx in &group[1..] {
+                            if !self.effects[idx].inner.eq_value_dyn(&*first_value) {
+                                return Err(format!(
+                                    "Conflicting effects for the same key (key length: {} bytes)",
+                                    key.len()
+                                ));
+                            }
                         }
                     }
+                    indices.push(group[0]);
                 }
-                // Keep one representative effect per key
-                unique_effects.push(effects[0]);
-            }
+                Ok(indices)
+            });
+            let unique_indices = match unique_indices {
+                Ok(indices) => indices,
+                Err(msg) => bail!("{msg}"),
+            };
 
-            // Step 3: Apply effects in parallel, tracking whether any write was needed.
-            // Use an AtomicBool so the flag is shareable across concurrent async closures.
-            let all_fast_pathed = AtomicBool::new(true);
-            futures::stream::iter(unique_effects)
+            // Apply effects using cached indices — per-key state check runs every time.
+            futures::stream::iter(unique_indices.iter())
                 .map(Ok::<_, anyhow::Error>)
-                .try_for_each_concurrent(APPLY_EFFECTS_CONCURRENCY_LIMIT, async |effect| {
+                .try_for_each_concurrent(APPLY_EFFECTS_CONCURRENCY_LIMIT, async |&idx| {
+                    let effect: &dyn DynEffect = &*self.effects[idx].inner;
                     let key = effect.key();
                     let state_storage = effect.state_storage();
 
-                    // Get or insert per-key entry (fast sync path)
+                    // Get or insert per-key entry
                     let entry = state_storage
                         .effect_state
                         .entry(key)
@@ -316,9 +303,6 @@ impl Effects {
                             return Ok(());
                         }
                     }
-
-                    // A write is needed — record that not all effects were fast-pathed
-                    all_fast_pathed.store(false, Ordering::Relaxed);
 
                     // Slow path: acquire the write lock and re-check before writing
                     let _write_guard = entry.write_lock.lock().await;
@@ -345,12 +329,6 @@ impl Effects {
                     Ok(())
                 })
                 .await?;
-
-            // If every effect hit the fast path, future apply() calls can return immediately
-            // without any allocation or iteration.
-            if all_fast_pathed.load(Ordering::Relaxed) {
-                self.all_applied.store(true, Ordering::Release);
-            }
 
             Ok::<(), anyhow::Error>(())
         }
