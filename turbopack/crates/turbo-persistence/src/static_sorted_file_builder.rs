@@ -1217,30 +1217,17 @@ impl<W: Write> IndexBlockBuilder<W> {
 
 #[cfg(test)]
 mod tests {
-    use std::hash::BuildHasherDefault;
-
-    use quick_cache::sync::Cache;
-    use rustc_hash::FxHasher;
-
     use super::*;
     use crate::{
         key::hash_key,
         lookup_entry::LookupValue,
         static_sorted_file::{
-            BlockWeighter, SstLookupResult, StaticSortedFile, StaticSortedFileMetaData,
+            BlockCache, SstLookupResult, StaticSortedFile, StaticSortedFileMetaData,
         },
     };
 
-    type TestBlockCache = Cache<
-        (u32, u16),
-        crate::ArcBytes,
-        BlockWeighter,
-        BuildHasherDefault<FxHasher>,
-        crate::static_sorted_file::BlockCacheLifecycle,
-    >;
-
-    fn make_cache() -> TestBlockCache {
-        TestBlockCache::with(
+    fn make_cache() -> BlockCache {
+        BlockCache::with(
             100,
             4 * 1024 * 1024,
             Default::default(),
@@ -1383,8 +1370,8 @@ mod tests {
     fn assert_lookup(
         sst: &StaticSortedFile,
         entry: &TestEntry,
-        kc: &TestBlockCache,
-        vc: &TestBlockCache,
+        kc: &BlockCache,
+        vc: &BlockCache,
     ) -> Result<()> {
         let result = sst.lookup::<_, false>(entry.hash, &entry.key, kc, vc)?;
         match (&entry.value_kind, result) {
