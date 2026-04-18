@@ -8,6 +8,7 @@ import {
   normalizeURL,
   execOnce,
   getUrlFromAppDirectory,
+  getPageExtensions,
 } from '../utils/url'
 
 const pagesDirWarning = execOnce((pagesDirs) => {
@@ -107,8 +108,11 @@ export default defineRule({
       return {}
     }
 
-    const pageUrls = cachedGetUrlFromPagesDirectories('/', foundPagesDirs)
-    const appDirUrls = cachedGetUrlFromAppDirectory('/', foundAppDirs)
+    // Read pageExtensions from next.config.js to support custom extensions
+    const pageExtensions = getPageExtensions(rootDirs)
+
+    const pageUrls = cachedGetUrlFromPagesDirectories('/', foundPagesDirs, pageExtensions)
+    const appDirUrls = cachedGetUrlFromAppDirectory('/', foundAppDirs, pageExtensions)
     const allUrlRegex = [...pageUrls, ...appDirUrls]
 
     return {
